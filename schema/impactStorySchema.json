@@ -1,0 +1,484 @@
+{
+  "schemaVersion": "0.1.0",
+  "productKey": "impact_story_builder",
+  "name": "Impact Story Builder Interview Schema",
+  "sourceDocument": "Impact_Story_Builder_Tool.docx",
+  "phase": "0",
+  "notes": [
+    "This schema covers the MVP interview flow only and excludes the future story library.",
+    "Validation lengths are pragmatic MVP defaults added to make the schema form-ready.",
+    "The source document requires a related resource link in the final story but does not define a matching interview question. That field is deferred from the MVP input schema.",
+    "The source document distinguishes exact quotes from draft or paraphrased quotes in generation guidance but does not define a dedicated input control. The MVP generator should treat provided quotes as draft-safe unless a later UI adds quote status."
+  ],
+  "steps": [
+    {
+      "stepNumber": 1,
+      "stepKey": "project_details",
+      "title": "Project details",
+      "purpose": "Capture the basic project context and what SEI did in one place, while still allowing pasted source text to prefill details when useful.",
+      "fields": [
+        {
+          "stepNumber": 1,
+          "fieldKey": "project_name_location",
+          "label": "What is the project name and location?",
+          "hint": "Include the country or region. This anchors the story geographically.",
+          "example": "Volta Basin Water Security - Ghana, West Africa",
+          "inputType": "text",
+          "requiredStatus": "required",
+          "validationRule": {
+            "summary": "Required; 5-140 characters after trimming.",
+            "required": true,
+            "trim": true,
+            "minLength": 5,
+            "maxLength": 140
+          },
+          "missingStateDisplayRule": {
+            "summary": "Show 'Not provided' in muted text on the review screen and block step submit and generation until completed.",
+            "reviewLabel": "Not provided",
+            "tone": "muted",
+            "blocksStepSubmit": true,
+            "blocksGeneration": true
+          }
+        },
+        {
+          "stepNumber": 1,
+          "fieldKey": "project_source_text",
+          "label": "Paste any existing project information here (optional)",
+          "hint": "Project page, workplan excerpt, grant description, or even a few sentences you have written before. The more you include, the fewer follow-up questions you will need to answer.",
+          "example": "We worked with the World Bank in Ghana to build a WEAP model for the Volta Basin. The project ran 2022-2024 and included three training workshops.",
+          "inputType": "textarea",
+          "requiredStatus": "optional",
+          "uiRows": 8,
+          "validationRule": {
+            "summary": "Optional; if present, trim whitespace and keep between 30 and 10000 characters.",
+            "required": false,
+            "trim": true,
+            "minLengthIfPresent": 30,
+            "maxLength": 10000
+          },
+          "missingStateDisplayRule": {
+            "summary": "Show 'No source text pasted' in muted text on the review screen; do not block progress or generation.",
+            "reviewLabel": "No source text pasted",
+            "tone": "muted",
+            "blocksStepSubmit": false,
+            "blocksGeneration": false,
+            "generationFallback": "Generate from direct interview answers only."
+          }
+        },
+        {
+          "stepNumber": 1,
+          "fieldKey": "sei_activities",
+          "label": "What did SEI do in this project?",
+          "hint": "Think: modeling, training workshops, policy engagement, tool development, research publications, stakeholder facilitation, or partnerships established.",
+          "example": "Built a WEAP model, ran 3 capacity-building workshops with 45 government staff, and co-authored a policy brief with the Ministry of Water.",
+          "inputType": "textarea",
+          "requiredStatus": "required",
+          "uiRows": 6,
+          "validationRule": {
+            "summary": "Required; 15-1500 characters after trimming.",
+            "required": true,
+            "trim": true,
+            "minLength": 15,
+            "maxLength": 1500
+          },
+          "missingStateDisplayRule": {
+            "summary": "Show 'Not provided' in muted text on the review screen and block step submit and generation until completed.",
+            "reviewLabel": "Not provided",
+            "tone": "muted",
+            "blocksStepSubmit": true,
+            "blocksGeneration": true
+          }
+        },
+        {
+          "stepNumber": 1,
+          "fieldKey": "project_adaptations",
+          "label": "Was anything added or changed during the project that was not in the original plan?",
+          "hint": "Capture adaptive changes, unexpected partnerships, scope expansions, or participant-driven additions.",
+          "example": "We added a stakeholder scenario exercise after the first workshop because participants asked for it. It became the highlight of the engagement.",
+          "inputType": "textarea",
+          "requiredStatus": "optional",
+          "uiRows": 6,
+          "validationRule": {
+            "summary": "Optional; if present, trim whitespace and keep between 10 and 1200 characters.",
+            "required": false,
+            "trim": true,
+            "minLengthIfPresent": 10,
+            "maxLength": 1200
+          },
+          "missingStateDisplayRule": {
+            "summary": "Show 'Not provided' in muted text on the review screen; do not block progress or generation.",
+            "reviewLabel": "Not provided",
+            "tone": "muted",
+            "blocksStepSubmit": false,
+            "blocksGeneration": false
+          }
+        }
+      ],
+      "postStepBehavior": {
+        "aiAnalysis": true,
+        "analysisSourceFieldKeys": [
+          "project_source_text"
+        ],
+        "prefillTargetFieldKeys": [
+          "project_name_location",
+          "sei_activities"
+        ],
+        "uiRules": [
+          "Run analysis before advancing if source text is present.",
+          "Mark inferred values so the user can confirm or correct them.",
+          "Store a confidence flag per inferred value."
+        ]
+      }
+    },
+    {
+      "stepNumber": 2,
+      "stepKey": "outcomes_and_impact",
+      "title": "Outcomes and impact",
+      "purpose": "Capture the most important outcome first, then add specificity about who benefited, at what scale, and what enabled success.",
+      "fields": [
+        {
+          "stepNumber": 2,
+          "fieldKey": "primary_outcome_type",
+          "label": "What was the single most important outcome of this project?",
+          "hint": "Choose one outcome type first, then describe it in your own words.",
+          "example": "Improved decisions",
+          "inputType": "single_select_cards",
+          "requiredStatus": "required",
+          "validationRule": {
+            "summary": "Required; exactly one option must be selected.",
+            "required": true,
+            "selectionMode": "single",
+            "minSelections": 1,
+            "maxSelections": 1
+          },
+          "missingStateDisplayRule": {
+            "summary": "Show 'No outcome type selected' in muted text on the review screen and block step submit and generation until completed.",
+            "reviewLabel": "No outcome type selected",
+            "tone": "muted",
+            "blocksStepSubmit": true,
+            "blocksGeneration": true
+          }
+        },
+        {
+          "stepNumber": 2,
+          "fieldKey": "primary_outcome_description",
+          "label": "Describe the most important outcome in your own words",
+          "hint": "State what changed and make the change concrete.",
+          "example": "Government agencies now use the WEAP model as the basis for water allocation decisions, which did not happen before the project.",
+          "inputType": "textarea",
+          "requiredStatus": "required",
+          "validationRule": {
+            "summary": "Required; 20-1200 characters after trimming.",
+            "required": true,
+            "trim": true,
+            "minLength": 20,
+            "maxLength": 1200
+          },
+          "missingStateDisplayRule": {
+            "summary": "Show 'Not provided' in muted text on the review screen and block step submit and generation until completed.",
+            "reviewLabel": "Not provided",
+            "tone": "muted",
+            "blocksStepSubmit": true,
+            "blocksGeneration": true
+          }
+        },
+        {
+          "stepNumber": 2,
+          "fieldKey": "beneficiaries_scale",
+          "label": "Who benefited, and at what scale?",
+          "hint": "Think populations, geographic areas, institutions, or species. Include numbers if available, even estimates.",
+          "example": "1.2 million people in the Volta Basin across three countries; 12 government agencies; 3 river basin authorities.",
+          "inputType": "textarea",
+          "requiredStatus": "required",
+          "validationRule": {
+            "summary": "Required; 10-1000 characters after trimming.",
+            "required": true,
+            "trim": true,
+            "minLength": 10,
+            "maxLength": 1000
+          },
+          "missingStateDisplayRule": {
+            "summary": "Show 'Not provided' in muted text on the review screen and block step submit and generation until completed.",
+            "reviewLabel": "Not provided",
+            "tone": "muted",
+            "blocksStepSubmit": true,
+            "blocksGeneration": true
+          }
+        },
+        {
+          "stepNumber": 2,
+          "fieldKey": "enabling_conditions",
+          "label": "What were the enabling conditions that made this success possible?",
+          "hint": "Think political windows, key champions, institutional trust, timing, the project approach, or partnerships.",
+          "example": "A new National Water Policy was under development and our findings fed directly into the drafting process, so the timing was critical.",
+          "inputType": "textarea",
+          "requiredStatus": "required",
+          "validationRule": {
+            "summary": "Required; 10-1000 characters after trimming.",
+            "required": true,
+            "trim": true,
+            "minLength": 10,
+            "maxLength": 1000
+          },
+          "missingStateDisplayRule": {
+            "summary": "Show 'Not provided' in muted text on the review screen and block step submit and generation until completed.",
+            "reviewLabel": "Not provided",
+            "tone": "muted",
+            "blocksStepSubmit": true,
+            "blocksGeneration": true
+          }
+        }
+      ]
+    },
+    {
+      "stepNumber": 3,
+      "stepKey": "evidence_and_voice",
+      "title": "Evidence and voice",
+      "purpose": "Collect the evidence that separates a specific impact story from a generic one: a quote, two statistics, and a forward-looking statement.",
+      "fields": [
+        {
+          "stepNumber": 3,
+          "fieldKey": "partner_quote",
+          "label": "Do you have a quote from a partner, beneficiary, or policymaker?",
+          "hint": "Even a paraphrase is fine. Include who said it and in what context.",
+          "example": "\"The WEAP model gave us a common language to negotiate water allocation across borders.\" - Ministry Director, Ghana, 2024",
+          "inputType": "textarea",
+          "requiredStatus": "optional",
+          "validationRule": {
+            "summary": "Optional; if present, trim whitespace and keep between 15 and 600 characters.",
+            "required": false,
+            "trim": true,
+            "minLengthIfPresent": 15,
+            "maxLength": 600
+          },
+          "missingStateDisplayRule": {
+            "summary": "Show 'Quote not provided' in muted warning text on the review screen; do not block progress, but generation should add [QUOTE NEEDED].",
+            "reviewLabel": "Quote not provided",
+            "tone": "warning_muted",
+            "blocksStepSubmit": false,
+            "blocksGeneration": false,
+            "generationFallback": "[QUOTE NEEDED]"
+          }
+        },
+        {
+          "stepNumber": 3,
+          "fieldKey": "impact_stat_1",
+          "label": "Share statistic 1 that shows why this work matters",
+          "hint": "Use scale of the problem, reach of the solution, before-and-after comparison, number of people or hectares affected, or WEAP user reach.",
+          "example": "The basin supplies drinking water to 1.2 million people across three countries.",
+          "inputType": "text",
+          "requiredStatus": "required",
+          "validationRule": {
+            "summary": "Required; 5-220 characters after trimming.",
+            "required": true,
+            "trim": true,
+            "minLength": 5,
+            "maxLength": 220
+          },
+          "missingStateDisplayRule": {
+            "summary": "Show 'Statistic 1 missing' in muted text on the review screen and block step submit and generation until completed.",
+            "reviewLabel": "Statistic 1 missing",
+            "tone": "muted",
+            "blocksStepSubmit": true,
+            "blocksGeneration": true,
+            "generationFallback": "[STAT NEEDED]"
+          }
+        },
+        {
+          "stepNumber": 3,
+          "fieldKey": "impact_stat_2",
+          "label": "Share statistic 2 that shows why this work matters",
+          "hint": "Use a second data point that reinforces scale, urgency, reach, or before-and-after change.",
+          "example": "58,000 WEAP users in 160+ countries rely on tools like the ones we built in this project.",
+          "inputType": "text",
+          "requiredStatus": "optional_but_strongly_encouraged",
+          "validationRule": {
+            "summary": "Optional but strongly encouraged; if present, trim whitespace and keep between 5 and 220 characters.",
+            "required": false,
+            "recommended": true,
+            "trim": true,
+            "minLengthIfPresent": 5,
+            "maxLength": 220
+          },
+          "missingStateDisplayRule": {
+            "summary": "Show 'Second statistic not provided' in muted warning text on the review screen; do not block progress, but generation should note that a second statistic would strengthen the story.",
+            "reviewLabel": "Second statistic not provided",
+            "tone": "warning_muted",
+            "blocksStepSubmit": false,
+            "blocksGeneration": false,
+            "generationFallback": "[SECOND STAT RECOMMENDED]"
+          }
+        },
+        {
+          "stepNumber": 3,
+          "fieldKey": "future_potential",
+          "label": "How could this work be applied or scaled in the future?",
+          "hint": "Think replication in other basins, influence on national policy, embedding in partner institutions, or becoming a regional standard.",
+          "example": "The model is now managed by the river basin authority and could be expanded to the Upper Volta sub-basins. We have already received inquiries from two neighboring countries.",
+          "inputType": "textarea",
+          "requiredStatus": "required",
+          "validationRule": {
+            "summary": "Required; 10-800 characters after trimming.",
+            "required": true,
+            "trim": true,
+            "minLength": 10,
+            "maxLength": 800
+          },
+          "missingStateDisplayRule": {
+            "summary": "Show 'Not provided' in muted text on the review screen and block step submit and generation until completed.",
+            "reviewLabel": "Not provided",
+            "tone": "muted",
+            "blocksStepSubmit": true,
+            "blocksGeneration": true
+          }
+        }
+      ]
+    },
+    {
+      "stepNumber": 4,
+      "stepKey": "review_and_generate",
+      "title": "Review and generate",
+      "purpose": "Show a clean summary of all collected answers, expose gaps before generation, and then create an editable story draft.",
+      "fields": [],
+      "reviewScreen": {
+        "showAllAnswers": true,
+        "groupAnswersByStep": true,
+        "reviewOrderFieldKeys": [
+          "project_name_location",
+          "project_source_text",
+          "sei_activities",
+          "project_adaptations",
+          "primary_outcome_type",
+          "primary_outcome_description",
+          "beneficiaries_scale",
+          "enabling_conditions",
+          "partner_quote",
+          "impact_stat_1",
+          "impact_stat_2",
+          "future_potential"
+        ],
+        "missingValueLabel": "Not provided",
+        "missingValueTone": "muted",
+        "editActionLabel": "Back",
+        "primaryActionLabel": "Generate my impact story"
+      },
+      "generation": {
+        "wordCountTarget": {
+          "min": 300,
+          "max": 400
+        },
+        "draftOutputFieldKey": "generated_story_draft",
+        "reviewNotesFieldKey": "generation_review_notes",
+        "draftDisplayType": "editable_textarea",
+        "showGapNotesBelowDraft": true
+      }
+    }
+  ],
+  "outcomeTypeOptions": [
+    {
+      "key": "improved_decisions",
+      "label": "Improved decisions",
+      "description": "Changed how a decision-maker or institution makes choices."
+    },
+    {
+      "key": "changed_agendas",
+      "label": "Changed agendas",
+      "description": "Brought an issue onto the policy or institutional agenda."
+    },
+    {
+      "key": "enhanced_capacities",
+      "label": "Enhanced capacities",
+      "description": "Increased the skills, tools, or knowledge of partners."
+    },
+    {
+      "key": "habitat_change",
+      "label": "Habitat change",
+      "description": "Created measurable change in area, quality, or condition of ecosystems."
+    },
+    {
+      "key": "improved_water_access",
+      "label": "Improved water access",
+      "description": "Changed the population served or the reliability of water access."
+    },
+    {
+      "key": "groundwater_resource",
+      "label": "Groundwater resource",
+      "description": "Changed aquifer management, monitoring, or knowledge."
+    },
+    {
+      "key": "other",
+      "label": "Other",
+      "description": "Use when the outcome does not fit one of the predefined categories."
+    }
+  ],
+  "storyTemplate": {
+    "templateKey": "sei_change_story_v1",
+    "audience": "funder_or_policy",
+    "wordCountTarget": {
+      "min": 300,
+      "max": 400
+    },
+    "toneRules": [
+      "Clear and evidence-based.",
+      "Accessible to funders and policy audiences.",
+      "Avoid internal jargon and unexplained acronyms.",
+      "Embed statistics naturally in narrative rather than listing them."
+    ],
+    "requiredStructure": [
+      {
+        "order": 1,
+        "sectionKey": "opening",
+        "instruction": "Name what SEI did and what it led to."
+      },
+      {
+        "order": 2,
+        "sectionKey": "outcome",
+        "instruction": "Explain the most important change, who benefited, and the scale."
+      },
+      {
+        "order": 3,
+        "sectionKey": "enabling_conditions",
+        "instruction": "Explain why the outcome became possible."
+      },
+      {
+        "order": 4,
+        "sectionKey": "voice",
+        "instruction": "Include the partner, beneficiary, or policymaker quote when available."
+      },
+      {
+        "order": 5,
+        "sectionKey": "evidence",
+        "instruction": "Embed both statistics in context when available."
+      },
+      {
+        "order": 6,
+        "sectionKey": "future_potential",
+        "instruction": "Close with the forward-looking statement on replication, scale, or next-phase potential."
+      }
+    ],
+    "draftTemplateLines": [
+      "{{project_name_location}} shows how SEI translated technical work into meaningful change. Through {{sei_activities}}, the project contributed to {{primary_outcome_description}}.",
+      "The most important result was {{primary_outcome_description}}, benefiting {{beneficiaries_scale}}.",
+      "This mattered at scale because {{impact_stat_1}} {{impact_stat_2_optional_sentence}}",
+      "The outcome became possible because {{enabling_conditions}}.",
+      "{{partner_quote_or_placeholder}}",
+      "Looking ahead, {{future_potential}}."
+    ],
+    "derivedTemplateTokens": {
+      "impact_stat_2_optional_sentence": "If impact_stat_2 exists, render it as a natural follow-on sentence. Otherwise use [SECOND STAT RECOMMENDED].",
+      "partner_quote_or_placeholder": "If partner_quote exists, include it in narrative or as a short pull quote. Otherwise use [QUOTE NEEDED]."
+    },
+    "missingElementMarkers": {
+      "partner_quote": "[QUOTE NEEDED]",
+      "impact_stat_1": "[STAT NEEDED]",
+      "impact_stat_2": "[SECOND STAT RECOMMENDED]"
+    },
+    "deferredElements": [
+      {
+        "fieldKey": "related_resource_link",
+        "status": "deferred_from_mvp_input_schema",
+        "note": "The source document expects a related link in the final story, but no interview field was defined for it."
+      }
+    ]
+  }
+}
