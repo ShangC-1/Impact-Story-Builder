@@ -58,10 +58,39 @@ const INPUT_TYPE_LABELS = {
   text: "text",
   textarea: "text",
   single_select_cards: "single_select_cards",
+  multi_select_cards: "multi_select_cards",
 };
 
 const LINKEDIN_REWRITER_URL = "https://translate.kagi.com/?from=en&to=linkedin";
 const CURRENT_FLOW_VERSION = "merged_step_v2";
+const STORY_TONE_OPTIONS = [
+  {
+    key: "professional",
+    label: "Professional",
+    description:
+      "Clear, polished, evidence-based, and suitable for internal reports, program communications, and general policy or funder audiences.",
+  },
+  {
+    key: "conversational",
+    label: "Conversational",
+    description:
+      "Accessible, plain-language, and easier to read while still sounding credible and evidence-based.",
+  },
+  {
+    key: "funder_facing",
+    label: "Funder-facing",
+    description:
+      "Outcome-oriented and evidence-forward, with emphasis on contribution, uptake, durability, scale, and future potential.",
+  },
+];
+const STORY_LENGTH_LIMITS = {
+  min: 100,
+  max: 750,
+  window: 50,
+  startMax: 700,
+  defaultMin: 300,
+  defaultMax: 350,
+};
 
 bootstrap();
 
@@ -140,8 +169,11 @@ function resetInterviewWorkspace() {
   setInterviewIdInUrl("");
 
   for (const field of getAllFields()) {
-    state.answers[field.fieldKey] = "";
+    state.answers[field.fieldKey] = field.inputType === "multi_select_cards" ? [] : "";
   }
+  state.answers.story_tone = STORY_TONE_OPTIONS[0].key;
+  state.answers.story_length_min = STORY_LENGTH_LIMITS.defaultMin;
+  state.answers.story_length_max = STORY_LENGTH_LIMITS.defaultMax;
 }
 
 function createInitialProviderSettings(backendHealth) {
@@ -188,9 +220,45 @@ function getAllFields(schema = state.schema) {
   return schema.steps.flatMap((step) => step.fields ?? []);
 }
 
+function getFieldByKey(fieldKey) {
+  return getAllFields().find((field) => field.fieldKey === fieldKey) ?? null;
+}
+
 function getOutcomeOptionLabel(optionKey) {
   const option = state.schema?.outcomeTypeOptions?.find((item) => item.key === optionKey);
   return option?.label ?? optionKey;
+}
+
+function getOutcomeSelection(value = state.answers.primary_outcome_type) {
+  return normalizeOutcomeSelection(value);
+}
+
+function getStoryTone() {
+  return normalizeStoryTone(state.answers.story_tone);
+}
+
+function getStoryLengthMin() {
+  return normalizeStoryLengthStartValue(
+    state.answers.story_length_min,
+    STORY_LENGTH_LIMITS.defaultMin,
+    state.answers.story_length_max
+  );
+}
+
+function getStoryLengthMax(lengthMin = getStoryLengthMin()) {
+  return deriveStoryLengthMax(lengthMin);
+}
+
+function getStoryStyleValidationMessage() {
+  const lengthMin = getStoryLengthMin();
+  const lengthMax = getStoryLengthMax();
+  if (lengthMin < STORY_LENGTH_LIMITS.min || lengthMin > STORY_LENGTH_LIMITS.startMax) {
+    return `Target length must stay between ${STORY_LENGTH_LIMITS.min} and ${STORY_LENGTH_LIMITS.max} words.`;
+  }
+  if (lengthMax > STORY_LENGTH_LIMITS.max) {
+    return `Target length must stay between ${STORY_LENGTH_LIMITS.min} and ${STORY_LENGTH_LIMITS.max} words.`;
+  }
+  return "";
 }
 
 function getCurrentModeLabel() {
@@ -273,10 +341,7 @@ function buildInterviewDraftPayload() {
     draftStatus: state.currentInterviewDraftStatus,
     currentStepIndex: state.currentStepIndex,
     reviewReturnStepIndex: state.reviewReturnStepIndex,
-    answers: {
-      ...state.answers,
-      __flowVersion: CURRENT_FLOW_VERSION,
-    },
+    answers: buildPersistedAnswers(),
     aiInferences: state.aiInferences,
     generatedStory: state.generatedStory,
     conciseVersion: state.conciseVersion,
@@ -285,13 +350,7 @@ function buildInterviewDraftPayload() {
 }
 
 function applyInterviewDraft(interview) {
-  const allFields = getAllFields();
-  const answers = interview.answers ?? {};
-  const nextAnswers = {};
-
-  for (const field of allFields) {
-    nextAnswers[field.fieldKey] = typeof answers[field.fieldKey] === "string" ? answers[field.fieldKey] : "";
-  }
+  const answers = normalizeLoadedAnswers(interview.answers ?? {});
 
   state.activeInterviewId = interview.id || "";
   state.currentInterviewProjectName = interview.projectName || "";
@@ -300,7 +359,7 @@ function applyInterviewDraft(interview) {
   state.currentInterviewOwnerEmail = interview.ownerEmail || state.currentUser?.email || "";
   state.currentInterviewCanEdit = Boolean(interview.canEdit);
   state.currentInterviewCopiedFromId = interview.copiedFromInterviewId || "";
-  state.answers = nextAnswers;
+  state.answers = answers;
   state.aiInferences = interview.aiInferences ?? {};
   state.generatedStory = interview.generatedStory ?? "";
   state.conciseVersion = interview.conciseVersion ?? "";
@@ -311,6 +370,46 @@ function applyInterviewDraft(interview) {
   state.currentStepIndex = normalizeSavedStepIndex(interview.currentStepIndex, answers);
 
   setInterviewIdInUrl(state.activeInterviewId);
+}
+
+function normalizeLoadedAnswers(rawAnswers = {}) {
+  const nextAnswers = {};
+
+  for (const field of getAllFields()) {
+    const legacyOutcomeValue =
+      field.fieldKey === "primary_outcome_type" && rawAnswers[field.fieldKey] == null
+        ? rawAnswers.primary_outcome_types
+        : rawAnswers[field.fieldKey];
+
+    if (field.inputType === "multi_select_cards") {
+      nextAnswers[field.fieldKey] = normalizeOutcomeSelection(legacyOutcomeValue);
+    } else {
+      nextAnswers[field.fieldKey] = typeof legacyOutcomeValue === "string" ? legacyOutcomeValue : "";
+    }
+  }
+
+  nextAnswers.story_tone = normalizeStoryTone(rawAnswers.story_tone);
+  nextAnswers.story_length_min = normalizeStoryLengthStartValue(
+    rawAnswers.story_length_min,
+    STORY_LENGTH_LIMITS.defaultMin,
+    rawAnswers.story_length_max
+  );
+  nextAnswers.story_length_max = getStoryLengthMax(nextAnswers.story_length_min);
+  nextAnswers.__flowVersion = normalizeAnswer(rawAnswers.__flowVersion) || CURRENT_FLOW_VERSION;
+  return nextAnswers;
+}
+
+function buildPersistedAnswers() {
+  const persistedAnswers = {
+    ...state.answers,
+    primary_outcome_type: getOutcomeSelection(),
+    story_tone: getStoryTone(),
+    story_length_min: getStoryLengthMin(),
+    story_length_max: getStoryLengthMax(),
+    __flowVersion: CURRENT_FLOW_VERSION,
+  };
+  delete persistedAnswers.primary_outcome_types;
+  return persistedAnswers;
 }
 
 function normalizeSavedStepIndex(rawIndex, answers = state.answers) {
@@ -981,12 +1080,13 @@ function renderInputControl(field) {
     `;
   }
 
-  if (field.inputType === "single_select_cards") {
+  if (field.inputType === "single_select_cards" || field.inputType === "multi_select_cards") {
+    const selectedValues = field.inputType === "multi_select_cards" ? getOutcomeSelection(value) : [value];
     return `
       <div class="option-grid" role="list" aria-label="${escapeHtml(field.label)}">
         ${(state.schema?.outcomeTypeOptions ?? [])
           .map((option) => {
-            const isSelected = value === option.key;
+            const isSelected = selectedValues.includes(option.key);
             return `
               <button
                 type="button"
@@ -994,6 +1094,7 @@ function renderInputControl(field) {
                 data-action="select-option"
                 data-field-key="${escapeHtml(field.fieldKey)}"
                 data-option-key="${escapeHtml(option.key)}"
+                data-selection-mode="${escapeHtml(field.inputType === "multi_select_cards" ? "multiple" : "single")}"
                 aria-pressed="${isSelected ? "true" : "false"}"
                 ${disabledAttr}
               >
@@ -1082,7 +1183,69 @@ function renderReviewStep() {
       <p>Review every response before generating the draft. Empty fields are shown as <strong>Not provided.</strong></p>
     </div>
     <div class="review-stack">${groupedReview}</div>
+    ${renderStoryStyleSettings()}
     ${storyMarkup}
+  `;
+}
+
+function renderStoryStyleSettings() {
+  const selectedTone = getStoryTone();
+  const selectedToneOption =
+    STORY_TONE_OPTIONS.find((toneOption) => toneOption.key === selectedTone) ?? STORY_TONE_OPTIONS[0];
+  const selectedLengthMin = getStoryLengthMin();
+  const selectedLengthMax = getStoryLengthMax();
+  const isReadOnly = isFormReadOnly();
+
+  return `
+    <section class="story-output story-style-card">
+      <div class="story-output-header story-style-header">
+        <div>
+          <p class="section-kicker">Before generation</p>
+          <h3>Story style settings</h3>
+        </div>
+        <span class="field-pill">Target length: ${selectedLengthMin}-${selectedLengthMax} words.</span>
+      </div>
+      <div class="story-style-stack story-style-compact-grid">
+        <div class="story-style-block story-style-field">
+          <label class="story-style-label" for="story_tone">Tone</label>
+          <select
+            id="story_tone"
+            class="text-input story-style-select"
+            data-style-field="story_tone"
+            ${isReadOnly ? "disabled" : ""}
+          >
+            ${STORY_TONE_OPTIONS.map(
+              (toneOption) => `
+                <option value="${escapeHtml(toneOption.key)}" ${toneOption.key === selectedTone ? "selected" : ""}>
+                  ${escapeHtml(toneOption.label)}
+                </option>
+              `
+            ).join("")}
+          </select>
+          <p class="story-helper-text">${escapeHtml(selectedToneOption.description)}</p>
+        </div>
+        <div class="story-style-block story-style-field">
+          <div class="story-style-range-header">
+            <p class="story-style-label">Length</p>
+            <p class="story-helper-text">Target length: ${selectedLengthMin}-${selectedLengthMax} words.</p>
+          </div>
+          <input
+            type="range"
+            class="story-length-slider"
+            min="${STORY_LENGTH_LIMITS.min}"
+            max="${STORY_LENGTH_LIMITS.startMax}"
+            value="${selectedLengthMin}"
+            data-style-field="story_length_min"
+            ${isReadOnly ? "disabled" : ""}
+          />
+          <div class="story-style-scale">
+            <span>${STORY_LENGTH_LIMITS.min}</span>
+            <strong>${selectedLengthMin}-${selectedLengthMax} words</strong>
+            <span>${STORY_LENGTH_LIMITS.max}</span>
+          </div>
+        </div>
+      </div>
+    </section>
   `;
 }
 
@@ -1142,19 +1305,23 @@ function renderConciseSection(buttonLabel) {
 }
 
 function formatReviewValue(field, rawValue) {
-  const value = typeof rawValue === "string" ? rawValue.trim() : rawValue;
+  const value =
+    field.inputType === "multi_select_cards" ? normalizeOutcomeSelection(rawValue) : typeof rawValue === "string" ? rawValue.trim() : rawValue;
 
-  if (!value) {
+  if (!value || (Array.isArray(value) && value.length === 0)) {
     return {
       isEmpty: true,
       html: "Not provided.",
     };
   }
 
-  if (field.inputType === "single_select_cards") {
+  if (field.inputType === "single_select_cards" || field.inputType === "multi_select_cards") {
+    const selectedValues = Array.isArray(value) ? value : [value];
     return {
       isEmpty: false,
-      html: escapeHtml(getOutcomeOptionLabel(value)),
+      html: `<div class="field-pills">${selectedValues
+        .map((optionKey) => `<span class="field-pill">${escapeHtml(getOutcomeOptionLabel(optionKey))}</span>`)
+        .join("")}</div>`,
     };
   }
 
@@ -1204,6 +1371,15 @@ function attachListeners() {
 
   document.querySelectorAll('[data-action="select-option"]').forEach((button) => {
     button.addEventListener("click", handleOptionSelect);
+  });
+
+  document.querySelectorAll('[data-action="select-tone"]').forEach((button) => {
+    button.addEventListener("click", handleToneSelect);
+  });
+
+  document.querySelectorAll("[data-style-field]").forEach((element) => {
+    element.addEventListener("input", handleStoryStyleInput);
+    element.addEventListener("change", handleStoryStyleInput);
   });
 
   document.querySelectorAll('[data-action="next"]').forEach((button) => {
@@ -1735,9 +1911,54 @@ function handleOptionSelect(event) {
   }
   const fieldKey = event.currentTarget.dataset.fieldKey;
   const optionKey = event.currentTarget.dataset.optionKey;
-  state.answers[fieldKey] = optionKey;
+  const selectionMode = event.currentTarget.dataset.selectionMode || "single";
+  if (selectionMode === "multiple") {
+    const nextSelection = new Set(getOutcomeSelection(state.answers[fieldKey]));
+    if (nextSelection.has(optionKey)) {
+      nextSelection.delete(optionKey);
+    } else {
+      nextSelection.add(optionKey);
+    }
+    state.answers[fieldKey] = Array.from(nextSelection);
+  } else {
+    state.answers[fieldKey] = optionKey;
+  }
   delete state.validationErrors[fieldKey];
   state.statusMessage = "";
+  render();
+}
+
+function handleToneSelect(event) {
+  if (isFormReadOnly()) {
+    return;
+  }
+  state.answers.story_tone = event.currentTarget.dataset.toneKey || STORY_TONE_OPTIONS[0].key;
+  state.statusMessage = state.generatedStory
+    ? "Story style updated. Generate again to apply the new tone or length settings."
+    : "";
+  state.statusTone = state.generatedStory ? "info" : state.statusTone;
+  render();
+}
+
+function handleStoryStyleInput(event) {
+  if (isFormReadOnly()) {
+    return;
+  }
+  const fieldKey = event.target.dataset.styleField;
+  if (!fieldKey) {
+    return;
+  }
+  if (fieldKey === "story_tone") {
+    state.answers.story_tone = normalizeStoryTone(event.target.value);
+  } else if (fieldKey === "story_length_min") {
+    const nextLengthMin = normalizeStoryLengthStartValue(event.target.value, STORY_LENGTH_LIMITS.defaultMin);
+    state.answers.story_length_min = nextLengthMin;
+    state.answers.story_length_max = getStoryLengthMax(nextLengthMin);
+  }
+  state.statusMessage = state.generatedStory
+    ? "Story style updated. Generate again to apply the new tone or length settings."
+    : "";
+  state.statusTone = state.generatedStory ? "info" : state.statusTone;
   render();
 }
 
@@ -1872,11 +2093,19 @@ async function handleGenerateStory() {
   }
 
   const blockingIssues = validateBlockingGenerationRules();
+  const storyStyleValidationMessage = getStoryStyleValidationMessage();
 
   if (blockingIssues.length > 0) {
     state.statusMessage = "Required fields are still missing. Go back and complete them before generating.";
     state.statusTone = "warning";
     state.reviewNotes = blockingIssues;
+    render();
+    return;
+  }
+
+  if (storyStyleValidationMessage) {
+    state.statusMessage = storyStyleValidationMessage;
+    state.statusTone = "warning";
     render();
     return;
   }
@@ -1888,7 +2117,11 @@ async function handleGenerateStory() {
 
   try {
     const result = await postJson("/api/generate-story", {
-      answers: state.answers,
+      answers: buildPersistedAnswers(),
+      tone: getStoryTone(),
+      lengthMin: getStoryLengthMin(),
+      lengthMax: getStoryLengthMax(),
+      outcomeTypes: getOutcomeSelection(),
       providerSettings: getProviderPayload(),
     });
     state.generatedStory = result.storyDraft ?? "";
@@ -1928,7 +2161,7 @@ async function handleGenerateConciseVersion() {
   try {
     const result = await postJson("/api/generate-concise-version", {
       generatedStory: state.generatedStory,
-      answers: state.answers,
+      answers: buildPersistedAnswers(),
       providerSettings: getProviderPayload(),
     });
     state.conciseVersion = result.conciseVersion ?? "";
@@ -1960,9 +2193,12 @@ function validateField(field, rawValue) {
   const rules = field.validationRule ?? {};
   const value = normalizeAnswer(rawValue);
 
-  if (field.inputType === "single_select_cards") {
-    if (rules.required && !value) {
-      return "Choose one outcome type to continue.";
+  if (field.inputType === "single_select_cards" || field.inputType === "multi_select_cards") {
+    const selectedValues = normalizeOutcomeSelection(rawValue);
+    if (rules.required && selectedValues.length === 0) {
+      return field.inputType === "multi_select_cards"
+        ? "Choose at least one outcome type to continue."
+        : "Choose one outcome type to continue.";
     }
     return "";
   }
@@ -1994,9 +2230,13 @@ function validateBlockingGenerationRules() {
   const messages = [];
 
   for (const field of getAllFields()) {
-    const value = normalizeAnswer(state.answers[field.fieldKey]);
+    const rawValue = state.answers[field.fieldKey];
     const blocksGeneration = field.missingStateDisplayRule?.blocksGeneration;
-    if (blocksGeneration && !value) {
+    const hasValue =
+      field.inputType === "multi_select_cards"
+        ? normalizeOutcomeSelection(rawValue).length > 0
+        : Boolean(normalizeAnswer(rawValue));
+    if (blocksGeneration && !hasValue) {
       messages.push(`${field.label}: required before generation.`);
     }
   }
@@ -2050,6 +2290,53 @@ function focusFirstErroredField(errors) {
   if (target) {
     target.focus();
   }
+}
+
+function normalizeOutcomeSelection(value) {
+  const rawValues = Array.isArray(value) ? value : typeof value === "string" ? [value] : [];
+  return Array.from(
+    new Set(
+      rawValues
+        .map((item) => (typeof item === "string" ? item.trim() : ""))
+        .filter(Boolean)
+    )
+  );
+}
+
+function normalizeStoryTone(value) {
+  const toneKey = normalizeAnswer(value) || STORY_TONE_OPTIONS[0].key;
+  if (toneKey === "formal") {
+    return "professional";
+  }
+  return STORY_TONE_OPTIONS.some((item) => item.key === toneKey) ? toneKey : STORY_TONE_OPTIONS[0].key;
+}
+
+function normalizeStoryLengthValue(value, fallback) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.max(STORY_LENGTH_LIMITS.min, Math.min(STORY_LENGTH_LIMITS.max, parsed));
+}
+
+function normalizeStoryLengthStartValue(value, fallback, pairedMaxValue = null) {
+  const parsed = Number.parseInt(String(value ?? ""), 10);
+  let normalizedValue = Number.isFinite(parsed) ? parsed : fallback;
+  if (!Number.isFinite(parsed) && pairedMaxValue != null) {
+    const parsedMax = Number.parseInt(String(pairedMaxValue ?? ""), 10);
+    if (Number.isFinite(parsedMax)) {
+      normalizedValue = parsedMax - STORY_LENGTH_LIMITS.window;
+    }
+  }
+  return Math.max(STORY_LENGTH_LIMITS.min, Math.min(STORY_LENGTH_LIMITS.startMax, normalizedValue));
+}
+
+function deriveStoryLengthMax(lengthMin) {
+  const safeLengthMin = normalizeStoryLengthStartValue(lengthMin, STORY_LENGTH_LIMITS.defaultMin);
+  return Math.max(
+    STORY_LENGTH_LIMITS.min + STORY_LENGTH_LIMITS.window,
+    Math.min(STORY_LENGTH_LIMITS.max, safeLengthMin + STORY_LENGTH_LIMITS.window)
+  );
 }
 
 function normalizeAnswer(value) {

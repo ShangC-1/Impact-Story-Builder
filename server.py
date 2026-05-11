@@ -47,6 +47,36 @@ SERVER_LOG_PATH = RUNTIME_ROOT / "impact-story-builder-server.log"
 DEFAULT_DATABASE_PATH = RUNTIME_ROOT / "impact_story_builder_demo.sqlite3"
 VALID_DRAFT_STATUSES = {"draft", "ready_for_review", "final"}
 VALID_VISIBILITIES = {"private", "shared"}
+STORY_LENGTH_MIN = 100
+STORY_LENGTH_MAX = 750
+STORY_LENGTH_WINDOW = 50
+STORY_LENGTH_START_MAX = STORY_LENGTH_MAX - STORY_LENGTH_WINDOW
+STORY_LENGTH_DEFAULT_MIN = 300
+STORY_LENGTH_DEFAULT_MAX = 350
+STORY_LENGTH_MIN_INTERVAL = 25
+STORY_TONE_OPTIONS = {
+    "professional": {
+        "label": "Professional",
+        "description": (
+            "Clear, polished, evidence-based, and suitable for SEI internal reports, program communications, "
+            "and general policy or funder audiences. It can be moderately formal, but should not sound bureaucratic."
+        ),
+    },
+    "conversational": {
+        "label": "Conversational",
+        "description": (
+            "Accessible, plain-language, and easier to read. It can use warmer transitions, "
+            "but should still sound credible and evidence-based."
+        ),
+    },
+    "funder_facing": {
+        "label": "Funder-facing",
+        "description": (
+            "Outcome-oriented and evidence-forward, suitable for donor updates, proposals, and impact reporting. "
+            "Emphasize contribution, uptake, durability, scale, and future potential without overstating causality."
+        ),
+    },
+}
 
 
 def load_dotenv(dotenv_path: Path) -> None:
@@ -252,6 +282,16 @@ class AuthenticatedUser:
     email: str
     role: str
     auth_source: str
+
+
+@dataclass
+class StoryGenerationSettings:
+    tone_key: str
+    tone_label: str
+    tone_description: str
+    length_min: int
+    length_max: int
+    outcome_types: tuple[str, ...]
 
 
 class PersistenceStore:
@@ -839,7 +879,7 @@ class PersistenceStore:
                 "project_name_location": sample_project,
                 "sei_activities": "Built a WEAP model, trained basin staff, and translated the findings into a policy-facing brief.",
                 "project_adaptations": "Added a stakeholder scenario exercise after early workshops highlighted coordination gaps.",
-                "primary_outcome_type": "improved_decisions",
+                "primary_outcome_type": ["improved_decisions"],
                 "primary_outcome_description": "Partner agencies now use the model to compare allocation scenarios before making seasonal planning decisions.",
                 "beneficiaries_scale": "Three basin institutions and downstream communities across the Volta Basin.",
                 "enabling_conditions": "Strong demand from basin authorities and good timing with an active policy review process.",
@@ -847,6 +887,9 @@ class PersistenceStore:
                 "impact_stat_1": "45 staff participated in the capacity-building series.",
                 "impact_stat_2": "3 institutions adopted the shared scenario review process.",
                 "future_potential": "The same approach could be adapted for neighboring basins facing similar coordination challenges.",
+                "story_tone": "professional",
+                "story_length_min": STORY_LENGTH_DEFAULT_MIN,
+                "story_length_max": STORY_LENGTH_DEFAULT_MAX,
             }
             self._execute(
                 connection,
@@ -929,8 +972,69 @@ class PersistenceStore:
     def _can_view_row(self, row: Any, user: AuthenticatedUser) -> bool:
         return self._is_owner_row(row, user) or str(row["visibility"] or "private") == "shared"
 
+    def _normalize_outcome_types(self, raw_value: Any) -> list[str]:
+        if isinstance(raw_value, list):
+            raw_items = raw_value
+        elif isinstance(raw_value, str):
+            raw_items = [raw_value]
+        else:
+            raw_items = []
+
+        outcome_types: list[str] = []
+        for item in raw_items:
+            if not isinstance(item, str):
+                continue
+            value = item.strip()
+            if value and value not in outcome_types:
+                outcome_types.append(value)
+        return outcome_types
+
+    def _normalize_answers(self, answers: dict[str, Any]) -> dict[str, Any]:
+        normalized_answers = dict(answers)
+        normalized_answers["primary_outcome_type"] = self._normalize_outcome_types(
+            normalized_answers.get("primary_outcome_type")
+            if "primary_outcome_type" in normalized_answers
+            else normalized_answers.get("primary_outcome_types")
+        )
+        if "story_tone" not in normalized_answers or not str(normalized_answers.get("story_tone") or "").strip():
+            normalized_answers["story_tone"] = "professional"
+        length_min = self._normalize_story_length_start_value(
+            normalized_answers.get("story_length_min"),
+            STORY_LENGTH_DEFAULT_MIN,
+            normalized_answers.get("story_length_max"),
+        )
+        normalized_answers["story_length_min"] = length_min
+        normalized_answers["story_length_max"] = self._derive_story_length_max(length_min)
+        return normalized_answers
+
+    def _outcome_type_labels(self, outcome_types: list[str] | tuple[str, ...]) -> list[str]:
+        return [outcome_type.replace("_", " ").strip().title() for outcome_type in outcome_types if outcome_type]
+
+    def _normalize_story_length_start_value(
+        self,
+        raw_value: Any,
+        default_value: int,
+        paired_max_value: Any | None = None,
+    ) -> int:
+        try:
+            parsed = int(raw_value)
+        except (TypeError, ValueError):
+            parsed = default_value
+            if paired_max_value is not None:
+                try:
+                    parsed = int(paired_max_value) - STORY_LENGTH_WINDOW
+                except (TypeError, ValueError):
+                    parsed = default_value
+        return max(STORY_LENGTH_MIN, min(STORY_LENGTH_START_MAX, parsed))
+
+    def _derive_story_length_max(self, length_min: int) -> int:
+        return max(
+            STORY_LENGTH_MIN + STORY_LENGTH_WINDOW,
+            min(STORY_LENGTH_MAX, int(length_min) + STORY_LENGTH_WINDOW),
+        )
+
     def _serialize_interview(self, row: Any, *, user: AuthenticatedUser) -> dict[str, Any]:
-        answers = json.loads(str(row["answers_json"] or "{}"))
+        answers = self._normalize_answers(json.loads(str(row["answers_json"] or "{}")))
         is_owner = self._is_owner_row(row, user)
         return {
             "id": str(row["id"]),
@@ -956,14 +1060,16 @@ class PersistenceStore:
         }
 
     def _serialize_interview_summary(self, row: Any, *, user: AuthenticatedUser) -> dict[str, Any]:
-        answers = json.loads(str(row["answers_json"] or "{}"))
+        answers = self._normalize_answers(json.loads(str(row["answers_json"] or "{}")))
         project_name = str(row["project_name"] or derive_project_name(answers.get("project_name_location")) or "Untitled interview")
+        outcome_types = self._normalize_outcome_types(answers.get("primary_outcome_type"))
         return {
             "id": str(row["id"]),
             "projectName": project_name,
             "title": project_name,
             "region": derive_region(answers.get("project_name_location") or project_name),
-            "outcomeType": str(answers.get("primary_outcome_type") or ""),
+            "outcomeType": ", ".join(self._outcome_type_labels(outcome_types)),
+            "outcomeTypes": outcome_types,
             "visibility": str(row["visibility"] or "private"),
             "draftStatus": str(row["draft_status"] or "draft"),
             "ownerEmail": str(row["owner_email"] or ""),
@@ -1002,6 +1108,7 @@ class BaseProvider:
         service: "ImpactStoryService",
         settings: ProviderSettings,
         answers: dict[str, Any],
+        story_settings: StoryGenerationSettings,
     ) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -1046,8 +1153,9 @@ class MockProvider(BaseProvider):
         service: "ImpactStoryService",
         settings: ProviderSettings,
         answers: dict[str, Any],
+        story_settings: StoryGenerationSettings,
     ) -> dict[str, Any]:
-        return service._mock_generate_story(answers)
+        return service._mock_generate_story(answers, story_settings)
 
     def generate_concise_version(
         self,
@@ -1095,12 +1203,13 @@ class ClaudeProvider(BaseProvider):
         service: "ImpactStoryService",
         settings: ProviderSettings,
         answers: dict[str, Any],
+        story_settings: StoryGenerationSettings,
     ) -> dict[str, Any]:
         result = self._structured_json_call(
             service=service,
             settings=settings,
-            system_prompt=service.generation_developer_prompt(),
-            user_prompt=service.generation_user_prompt(answers),
+            system_prompt=service.generation_developer_prompt(story_settings),
+            user_prompt=service.generation_user_prompt(answers, story_settings),
             max_tokens=1600,
         )
         return service.transform_generation_result(result, mode=self.provider_key, provider_label=self.provider_label)
@@ -1257,12 +1366,13 @@ class OpenAICompatibleProvider(BaseProvider):
         service: "ImpactStoryService",
         settings: ProviderSettings,
         answers: dict[str, Any],
+        story_settings: StoryGenerationSettings,
     ) -> dict[str, Any]:
         result = self._structured_json_call(
             service=service,
             settings=settings,
-            system_prompt=service.generation_developer_prompt(),
-            user_prompt=service.generation_user_prompt(answers),
+            system_prompt=service.generation_developer_prompt(story_settings),
+            user_prompt=service.generation_user_prompt(answers, story_settings),
             max_tokens=1600,
         )
         return service.transform_generation_result(result, mode=self.provider_key, provider_label=self.provider_label)
@@ -1431,6 +1541,11 @@ class ImpactStoryService:
             database_url=config.database_url,
         )
         self.fields = self._index_fields(schema)
+        self.outcome_options = {
+            str(item.get("key")): str(item.get("label") or item.get("key") or "").strip()
+            for item in schema.get("outcomeTypeOptions", [])
+            if str(item.get("key") or "").strip()
+        }
         self.providers: dict[str, BaseProvider] = {
             "mock": MockProvider(),
             "claude": ClaudeProvider(),
@@ -1534,11 +1649,12 @@ class ImpactStoryService:
         )
 
     def generate_story(self, payload: dict[str, Any], *, user: AuthenticatedUser) -> dict[str, Any]:
-        answers = payload.get("answers") or {}
+        answers = self._normalize_answers(payload.get("answers") or {})
+        story_settings = self._normalize_story_generation_settings(payload, answers)
         missing_required = [
             self.fields[field_key]["label"]
             for field_key in self.required_generation_fields
-            if not str(answers.get(field_key, "")).strip()
+            if self._is_missing_field_value(field_key, answers.get(field_key))
         ]
         if missing_required:
             raise AppError(
@@ -1548,7 +1664,12 @@ class ImpactStoryService:
 
         settings = ProviderSettings.from_payload(payload.get("providerSettings"), self.config.defaults)
         provider = self._provider(settings.provider)
-        return provider.generate_story(service=self, settings=settings, answers=answers)
+        return provider.generate_story(
+            service=self,
+            settings=settings,
+            answers=answers,
+            story_settings=story_settings,
+        )
 
     def generate_concise_version(self, payload: dict[str, Any], *, user: AuthenticatedUser) -> dict[str, Any]:
         answers = payload.get("answers") or {}
@@ -1683,6 +1804,8 @@ class ImpactStoryService:
         if not isinstance(review_notes, list):
             raise AppError("reviewNotes must be an array.")
 
+        answers = self._normalize_answers(answers)
+
         project_name = derive_project_name(payload.get("projectName"))
         if not project_name:
             project_name = derive_project_name(answers.get("project_name_location"))
@@ -1708,6 +1831,128 @@ class ImpactStoryService:
             "concise_version": str(payload.get("conciseVersion") or ""),
             "review_notes_json": json.dumps(review_notes, ensure_ascii=True),
         }
+
+    def _normalize_answers(self, answers: dict[str, Any]) -> dict[str, Any]:
+        normalized_answers = dict(answers)
+        normalized_answers["primary_outcome_type"] = self._normalize_outcome_types(
+            normalized_answers.get("primary_outcome_type")
+            if "primary_outcome_type" in normalized_answers
+            else normalized_answers.get("primary_outcome_types")
+        )
+        normalized_answers["story_tone"] = self._normalize_story_tone(normalized_answers.get("story_tone"))
+        length_min = self._normalize_story_length_start_value(
+            normalized_answers.get("story_length_min"),
+            STORY_LENGTH_DEFAULT_MIN,
+            normalized_answers.get("story_length_max"),
+        )
+        normalized_answers["story_length_min"] = length_min
+        normalized_answers["story_length_max"] = self._derive_story_length_max(length_min)
+        return normalized_answers
+
+    def _normalize_outcome_types(self, raw_value: Any) -> list[str]:
+        if isinstance(raw_value, list):
+            raw_items = raw_value
+        elif isinstance(raw_value, str):
+            raw_items = [raw_value]
+        else:
+            raw_items = []
+
+        outcome_types: list[str] = []
+        for item in raw_items:
+            if not isinstance(item, str):
+                continue
+            value = item.strip()
+            if value and value not in outcome_types:
+                outcome_types.append(value)
+        return outcome_types
+
+    def _normalize_story_tone(self, raw_value: Any) -> str:
+        tone_key = str(raw_value or "").strip() or "professional"
+        if tone_key == "formal":
+            return "professional"
+        return tone_key if tone_key in STORY_TONE_OPTIONS else "professional"
+
+    def _normalize_story_length_value(self, raw_value: Any, default_value: int) -> int:
+        try:
+            parsed = int(raw_value)
+        except (TypeError, ValueError):
+            return default_value
+        return max(STORY_LENGTH_MIN, min(STORY_LENGTH_MAX, parsed))
+
+    def _normalize_story_length_start_value(
+        self,
+        raw_value: Any,
+        default_value: int,
+        paired_max_value: Any | None = None,
+    ) -> int:
+        try:
+            parsed = int(raw_value)
+        except (TypeError, ValueError):
+            parsed = default_value
+            if paired_max_value is not None:
+                try:
+                    parsed = int(paired_max_value) - STORY_LENGTH_WINDOW
+                except (TypeError, ValueError):
+                    parsed = default_value
+        return max(STORY_LENGTH_MIN, min(STORY_LENGTH_START_MAX, parsed))
+
+    def _derive_story_length_max(self, length_min: int) -> int:
+        return max(
+            STORY_LENGTH_MIN + STORY_LENGTH_WINDOW,
+            min(STORY_LENGTH_MAX, int(length_min) + STORY_LENGTH_WINDOW),
+        )
+
+    def _normalize_story_generation_settings(
+        self,
+        payload: dict[str, Any],
+        answers: dict[str, Any],
+    ) -> StoryGenerationSettings:
+        tone_key = self._normalize_story_tone(payload.get("tone") or answers.get("story_tone"))
+        length_min = self._normalize_story_length_start_value(
+            payload.get("lengthMin") if payload.get("lengthMin") is not None else answers.get("story_length_min"),
+            STORY_LENGTH_DEFAULT_MIN,
+            payload.get("lengthMax") if payload.get("lengthMax") is not None else answers.get("story_length_max"),
+        )
+        length_max = self._normalize_story_length_value(
+            payload.get("lengthMax") if payload.get("lengthMax") is not None else answers.get("story_length_max"),
+            self._derive_story_length_max(length_min),
+        )
+        outcome_types = tuple(
+            self._normalize_outcome_types(
+                payload.get("outcomeTypes")
+                if payload.get("outcomeTypes") is not None
+                else answers.get("primary_outcome_type")
+            )
+        )
+
+        if length_max < length_min:
+            raise AppError("Maximum length must be greater than or equal to minimum length.")
+        if length_max - length_min < STORY_LENGTH_MIN_INTERVAL:
+            raise AppError(
+                f"Keep at least {STORY_LENGTH_MIN_INTERVAL} words between minimum and maximum length."
+            )
+
+        tone_config = STORY_TONE_OPTIONS[tone_key]
+        return StoryGenerationSettings(
+            tone_key=tone_key,
+            tone_label=str(tone_config["label"]),
+            tone_description=str(tone_config["description"]),
+            length_min=length_min,
+            length_max=length_max,
+            outcome_types=outcome_types,
+        )
+
+    def _is_missing_field_value(self, field_key: str, raw_value: Any) -> bool:
+        field = self.fields.get(field_key) or {}
+        input_type = str(field.get("inputType") or "")
+        if input_type == "multi_select_cards":
+            return len(self._normalize_outcome_types(raw_value)) == 0
+        if isinstance(raw_value, list):
+            return len(raw_value) == 0
+        return not str(raw_value or "").strip()
+
+    def _outcome_type_labels(self, outcome_types: list[str] | tuple[str, ...]) -> list[str]:
+        return [self.outcome_options.get(outcome_type, outcome_type.replace("_", " ")) for outcome_type in outcome_types]
 
     def analysis_developer_prompt(self) -> str:
         return textwrap.dedent(
@@ -1753,7 +1998,7 @@ class ImpactStoryService:
             """
         ).strip()
 
-    def generation_developer_prompt(self) -> str:
+    def generation_developer_prompt(self, story_settings: StoryGenerationSettings) -> str:
         template = self.schema.get("storyTemplate", {})
         structure = "\n".join(
             f"{item['order']}. {item['instruction']}" for item in template.get("requiredStructure", [])
@@ -1762,7 +2007,9 @@ class ImpactStoryService:
         return textwrap.dedent(
             f"""
             You write SEI change stories for funder and policy audiences.
-            Write a single polished draft between {template.get('wordCountTarget', {}).get('min', 300)} and {template.get('wordCountTarget', {}).get('max', 400)} words.
+            Write a single polished draft between {story_settings.length_min} and {story_settings.length_max} words.
+            Use the selected tone: {story_settings.tone_label}.
+            Tone guidance: {story_settings.tone_description}
 
             Required structure:
             {structure}
@@ -1771,18 +2018,28 @@ class ImpactStoryService:
             {tone_rules}
 
             Important generation rules:
+            - Keep within the selected word-count range as closely as possible.
+            - Use contribution language where appropriate. Do not overstate causality.
             - Use the partner quote verbatim when one is provided.
             - If no quote is provided, include [QUOTE NEEDED] in the draft and mention the gap in review_notes.
             - If the first statistic is missing, include [STAT NEEDED] in the draft and mention it in review_notes.
             - If the second statistic is missing, keep the draft readable but include [SECOND STAT RECOMMENDED] in the draft and mention it in review_notes.
+            - If multiple outcome types are selected, weave them together in a coherent way instead of listing disconnected categories.
+            - Do not invent statistics, quotes, formal adoption, policy impact, or scale.
+            - Always expand WEAP on first mention as Water Evaluation and Adaptation Planning (WEAP). After the first mention, use WEAP.
             - Keep the story accessible. Avoid unexplained acronyms and internal jargon.
             - Return JSON that matches the requested structure.
             """
         ).strip()
 
-    def generation_user_prompt(self, answers: dict[str, Any]) -> str:
+    def generation_user_prompt(self, answers: dict[str, Any], story_settings: StoryGenerationSettings) -> str:
+        selected_outcome_labels = self._outcome_type_labels(story_settings.outcome_types)
         ordered_answers = {
-            field_key: str(answers.get(field_key, "")).strip()
+            field_key: (
+                self._normalize_outcome_types(answers.get(field_key))
+                if field_key == "primary_outcome_type"
+                else str(answers.get(field_key, "")).strip()
+            )
             for field_key in [
                 "project_source_text",
                 "project_name_location",
@@ -1800,6 +2057,19 @@ class ImpactStoryService:
         }
         return textwrap.dedent(
             f"""
+            Story settings:
+            {json.dumps(
+                {
+                    "tone": story_settings.tone_label,
+                    "tone_description": story_settings.tone_description,
+                    "target_word_count_range": f"{story_settings.length_min}-{story_settings.length_max}",
+                    "selected_outcome_types": list(story_settings.outcome_types),
+                    "selected_outcome_labels": selected_outcome_labels,
+                },
+                indent=2,
+                ensure_ascii=True,
+            )}
+
             Create an impact story draft from these interview answers:
             {json.dumps(ordered_answers, indent=2, ensure_ascii=True)}
 
@@ -1820,6 +2090,7 @@ class ImpactStoryService:
             Keep it concise, clear, factual, and readable by a general audience.
             Do not use hashtags.
             Do not invent new facts.
+            Always expand WEAP on first mention as Water Evaluation and Adaptation Planning (WEAP). After the first mention, use WEAP.
             Keep the tone professional, not promotional or exaggerated.
             Aim for roughly 70 to 120 words.
             Return JSON that matches the requested structure.
@@ -1941,10 +2212,13 @@ class ImpactStoryService:
             ],
         }
 
-    def _mock_generate_story(self, answers: dict[str, Any]) -> dict[str, Any]:
+    def _mock_generate_story(self, answers: dict[str, Any], story_settings: StoryGenerationSettings) -> dict[str, Any]:
         project = self._answer(answers, "project_name_location", "This project")
         activities = self._clean_fragment(self._answer(answers, "sei_activities", "delivered a set of technical activities"))
-        outcome_type = self._answer(answers, "primary_outcome_type", "other").replace("_", " ")
+        outcome_labels = self._outcome_type_labels(
+            story_settings.outcome_types or tuple(self._normalize_outcome_types(answers.get("primary_outcome_type")))
+        )
+        outcome_phrase = self._format_outcome_type_phrase(outcome_labels or ["meaningful change"])
         outcome = self._clean_fragment(self._answer(answers, "primary_outcome_description", "created a meaningful outcome"))
         beneficiaries = self._clean_fragment(self._answer(answers, "beneficiaries_scale", "key partners and communities"))
         enabling_conditions = self._clean_fragment(self._answer(answers, "enabling_conditions", "timing, trust, and strong collaboration aligned"))
@@ -1956,14 +2230,14 @@ class ImpactStoryService:
         source_text = self._answer(answers, "project_source_text", "")
 
         source_sentence = (
-            "The draft draws on pasted project material as well as direct interview responses, which helps ground the story in existing documentation."
+            "This draft draws on pasted project material as well as direct interview responses, which helps ground the narrative in existing documentation."
             if source_text
-            else "The draft relies on direct interview responses because no source material was pasted into Step 1."
+            else "This draft relies on direct interview responses because no source material was pasted into the project context field."
         )
         adaptation_sentence = (
             f"An important implementation detail was that {self._lowercase_first(project_adaptations)}."
             if project_adaptations
-            else "The story would be stronger with any adaptive changes or unexpected project pivots confirmed later."
+            else "Any adaptive changes or unexpected project pivots could still be added to strengthen the implementation narrative."
         )
         quote_sentence = (
             "A confirmed partner or policymaker quote should still be added before wider sharing."
@@ -1975,15 +2249,69 @@ class ImpactStoryService:
             if stat_2 == "[SECOND STAT RECOMMENDED]"
             else f"{self._sentence_case(stat_2)}."
         )
+        if story_settings.tone_key == "conversational":
+            opening_sentence = f"{project} shows how SEI turned practical project work into visible progress across {outcome_phrase}."
+            closing_sentence = f"Looking ahead, {self._lowercase_first(future_potential)}. This gives colleagues a strong starting draft to refine rather than beginning from scratch."
+        elif story_settings.tone_key == "funder_facing":
+            opening_sentence = f"{project} shows how SEI contributed to measurable progress across {outcome_phrase}."
+            closing_sentence = f"Looking ahead, {self._lowercase_first(future_potential)}. That future pathway reinforces why this contribution is worth sustaining and scaling."
+        else:
+            opening_sentence = f"{project} demonstrates how SEI translated technical collaboration into clear, evidence-based progress across {outcome_phrase}."
+            closing_sentence = f"Looking ahead, {self._lowercase_first(future_potential)}. This draft already provides a polished first version that a colleague can refine."
 
-        story = "\n\n".join(
-            [
-                f"{project} demonstrates how SEI translated technical collaboration into visible {outcome_type}. Through this work, the team {self._lowercase_first(activities)}. Rather than stopping at activity delivery, the project contributed to a more durable change: {self._lowercase_first(outcome)}. That framing gives the story a clear answer to what SEI did and what it led to, which is the central requirement of the interview flow.",
-                f"{source_sentence} The outcome benefited {beneficiaries}, which shows why the work matters in practical as well as strategic terms. One signal of scale is that {self._lowercase_first(stat_1)}. {stat_2_sentence} Together, those details move the story beyond a generic success narrative and give it the kind of specificity that funders and policy audiences typically expect.",
-                f"This progress became possible because {self._lowercase_first(enabling_conditions)}. {adaptation_sentence} That kind of context matters because it explains not just that something changed, but why the change was possible in this moment and why the approach may be credible elsewhere. {quote_sentence}",
-                f"Looking ahead, {self._lowercase_first(future_potential)}. In a fuller production workflow, the team could still refine this draft with a confirmed quote, additional statistics, and any audience-specific framing needed for outreach, donor reporting, or policy engagement. Even so, this version already provides a usable first draft that a colleague can edit rather than writing from a blank page.",
-            ]
-        )
+        core_sentences = [
+            opening_sentence,
+            f"Through this work, the team {self._lowercase_first(activities)}.",
+            f"The most important result was that {self._lowercase_first(outcome)}.",
+            f"The change benefited {beneficiaries}, which helps explain why the project mattered beyond activity delivery.",
+            f"This progress became possible because {self._lowercase_first(enabling_conditions)}.",
+            closing_sentence,
+        ]
+        supporting_sentences = [
+            source_sentence,
+            f"One signal of scale is that {self._lowercase_first(stat_1)}.",
+            stat_2_sentence,
+            adaptation_sentence,
+            quote_sentence,
+            "Together, those details move the draft beyond a generic success summary and make the story easier to use in communications.",
+            "The structure also helps connect what SEI did, what changed, and why that change matters for future action.",
+            "Where useful, the final version can still be tailored for donor reporting, internal communications, or policy outreach.",
+        ]
+        extension_sentences = [
+            "That mix of action, evidence, and context helps the story stay credible while still being readable for non-specialist audiences.",
+            "It also shows that the project mattered not only because activities happened, but because those activities supported a practical shift in decisions, practice, or capacity.",
+            "For internal teams, this kind of draft makes it easier to refine audience-specific language without losing the core evidence and project logic.",
+            "For external audiences, the emphasis on outcomes, scale, and enabling conditions creates a clearer link between technical work and public value.",
+        ]
+
+        target_min = story_settings.length_min
+        target_max = story_settings.length_max
+        target_midpoint = (target_min + target_max) // 2
+        selected_sentences = list(core_sentences)
+        next_support_index = 0
+
+        while self._word_count(" ".join(selected_sentences)) < target_min and next_support_index < len(supporting_sentences):
+            selected_sentences.append(supporting_sentences[next_support_index])
+            next_support_index += 1
+
+        while (
+            self._word_count(" ".join(selected_sentences)) < target_midpoint
+            and next_support_index < len(supporting_sentences)
+        ):
+            selected_sentences.append(supporting_sentences[next_support_index])
+            next_support_index += 1
+
+        extension_index = 0
+        while self._word_count(" ".join(selected_sentences)) < target_min:
+            selected_sentences.append(extension_sentences[extension_index % len(extension_sentences)])
+            extension_index += 1
+
+        story = self._expand_weap_first_mention(self._sentences_to_story(selected_sentences))
+
+        if self._word_count(story) > target_max and len(selected_sentences) > len(core_sentences):
+            while self._word_count(story) > target_max and len(selected_sentences) > len(core_sentences):
+                selected_sentences.pop()
+                story = self._expand_weap_first_mention(self._sentences_to_story(selected_sentences))
 
         review_notes: list[str] = []
         if quote == "[QUOTE NEEDED]":
@@ -2017,6 +2345,7 @@ class ImpactStoryService:
                 f"Looking ahead, {self._lowercase_first(future_potential)}.",
             ]
         ).strip()
+        concise = self._expand_weap_first_mention(concise)
 
         return {
             "mode": "mock",
@@ -2024,6 +2353,43 @@ class ImpactStoryService:
             "conciseVersion": concise,
             "wordCount": len(concise.split()),
         }
+
+    def _format_outcome_type_phrase(self, outcome_labels: list[str]) -> str:
+        cleaned = [label.strip() for label in outcome_labels if label.strip()]
+        if not cleaned:
+            return "meaningful change"
+        if len(cleaned) == 1:
+            return cleaned[0].lower()
+        if len(cleaned) == 2:
+            return f"{cleaned[0].lower()} and {cleaned[1].lower()}"
+        return f"{', '.join(label.lower() for label in cleaned[:-1])}, and {cleaned[-1].lower()}"
+
+    def _word_count(self, text: str) -> int:
+        return len(text.split())
+
+    def _sentences_to_story(self, sentences: list[str]) -> str:
+        paragraphs: list[str] = []
+        for index in range(0, len(sentences), 2):
+            paragraphs.append(" ".join(sentences[index : index + 2]).strip())
+        return "\n\n".join(paragraphs).strip()
+
+    def _expand_weap_first_mention(self, text: str) -> str:
+        if not text:
+            return text
+        updated = re.sub(
+            r"Water Evaluation and Planning\s*\(WEAP\)",
+            "Water Evaluation and Adaptation Planning (WEAP)",
+            text,
+            count=1,
+        )
+        updated = re.sub(
+            r"Water Evaluation and Planning",
+            "Water Evaluation and Adaptation Planning",
+            updated,
+        )
+        if "Water Evaluation and Adaptation Planning (WEAP)" in updated:
+            return updated
+        return re.sub(r"\bWEAP\b", "Water Evaluation and Adaptation Planning (WEAP)", updated, count=1)
 
     def _mock_project_name_location(self, source_text: str) -> str:
         lower = source_text.lower()

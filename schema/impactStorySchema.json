@@ -139,21 +139,20 @@
         {
           "stepNumber": 2,
           "fieldKey": "primary_outcome_type",
-          "label": "What was the single most important outcome of this project?",
-          "hint": "Choose one outcome type first, then describe it in your own words.",
+          "label": "What was/were the important outcome(s) of this project?",
+          "hint": "Select every outcome type that applies, then describe the most important result in your own words.",
           "example": "Improved decisions",
-          "inputType": "single_select_cards",
+          "inputType": "multi_select_cards",
           "requiredStatus": "required",
           "validationRule": {
-            "summary": "Required; exactly one option must be selected.",
+            "summary": "Required; at least one option must be selected.",
             "required": true,
-            "selectionMode": "single",
-            "minSelections": 1,
-            "maxSelections": 1
+            "selectionMode": "multiple",
+            "minSelections": 1
           },
           "missingStateDisplayRule": {
-            "summary": "Show 'No outcome type selected' in muted text on the review screen and block step submit and generation until completed.",
-            "reviewLabel": "No outcome type selected",
+            "summary": "Show 'No outcomes selected' in muted text on the review screen and block step submit and generation until completed.",
+            "reviewLabel": "No outcomes selected",
             "tone": "muted",
             "blocksStepSubmit": true,
             "blocksGeneration": true

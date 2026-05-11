@@ -987,6 +987,76 @@ body {
   margin-top: 1rem;
 }
 
+.story-style-card {
+  margin-top: 1rem;
+}
+
+.story-style-stack {
+  display: grid;
+  gap: 0.9rem;
+  margin-top: 0.9rem;
+}
+
+.story-style-compact-grid {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  align-items: start;
+}
+
+.story-style-block {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55rem;
+}
+
+.story-style-field {
+  min-width: 0;
+}
+
+.story-style-label {
+  margin: 0;
+  font-weight: 800;
+  color: var(--text);
+}
+
+.story-style-header {
+  align-items: flex-start;
+  gap: 0.75rem;
+  flex-wrap: wrap;
+}
+
+.story-style-range-header {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.75rem;
+  align-items: baseline;
+  flex-wrap: wrap;
+}
+
+.story-style-select {
+  padding-top: 0.78rem;
+  padding-bottom: 0.78rem;
+}
+
+.story-length-slider {
+  width: 100%;
+  accent-color: var(--accent);
+  margin: 0.1rem 0 0.15rem;
+}
+
+.story-style-scale {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--muted);
+  font-size: 0.92rem;
+}
+
+.story-style-scale strong {
+  color: var(--text);
+  font-size: 0.96rem;
+}
+
 .story-textarea {
   min-height: 18rem;
   margin-top: 1rem;
@@ -1041,6 +1111,10 @@ body {
   .dashboard-grid,
   .progress-steps,
   .option-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .story-style-compact-grid {
     grid-template-columns: 1fr;
   }
 
