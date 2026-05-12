@@ -104,8 +104,20 @@ const VOICE_INPUT_PRIVACY_NOTE =
   "Voice input creates a draft transcript. Please review and edit before saving or generating.";
 const VOICE_INPUT_UNSUPPORTED_MESSAGE =
   "Voice input is not supported in this browser. Please use Chrome or Edge, or type manually.";
+const DICTATION_STATUS_STARTING = "Starting microphone...";
+const DICTATION_STATUS_READY = "Microphone ready. Start speaking.";
 const SHARED_READ_ONLY_NOTICE = "This shared story is read-only. Copy it to My stories to edit your own version.";
-let activeSpeechRecognition = null;
+const activeDictationSession = {
+  fieldKey: "",
+  recognition: null,
+  phase: "idle",
+  isListening: false,
+  pendingInterimTranscript: "",
+  stopRequested: false,
+  stopPromise: null,
+  stopResolver: null,
+  stopTimeoutId: null,
+};
 
 bootstrap();
 
@@ -267,6 +279,105 @@ function isVoiceCapableField(field) {
 
 function getVoiceCapableFields(step = getCurrentStep()) {
   return (step?.fields ?? []).filter((field) => isVoiceCapableField(field));
+}
+
+function summarizeSpeechRecognitionResults(results) {
+  if (!results) {
+    return [];
+  }
+
+  return Array.from(results).map((result, resultIndex) => ({
+    resultIndex,
+    isFinal: Boolean(result?.isFinal),
+    alternatives: Array.from({ length: Number(result?.length) || 0 }, (_unused, alternativeIndex) => ({
+      alternativeIndex,
+      transcript: String(result?.[alternativeIndex]?.transcript || "").trim(),
+      confidence: Number(result?.[alternativeIndex]?.confidence || 0),
+    })),
+  }));
+}
+
+function recordDictationDebug(eventName, details = {}, rawPayload) {
+  const entry = {
+    at: new Date().toISOString(),
+    event: eventName,
+    ...details,
+  };
+
+  if (typeof window !== "undefined") {
+    if (!Array.isArray(window.__dictationDebugLog)) {
+      window.__dictationDebugLog = [];
+    }
+    window.__dictationDebugLog.push(entry);
+    if (window.__dictationDebugLog.length > 200) {
+      window.__dictationDebugLog.shift();
+    }
+  }
+
+  if (rawPayload !== undefined) {
+    console.debug("[dictation]", eventName, entry, rawPayload);
+    return;
+  }
+
+  console.debug("[dictation]", eventName, entry);
+}
+
+function syncActiveDictationUiState() {
+  state.activeDictationFieldKey =
+    (activeDictationSession.phase === "starting" || activeDictationSession.phase === "listening")
+      && activeDictationSession.fieldKey
+      ? activeDictationSession.fieldKey
+      : "";
+}
+
+function resolveActiveDictationStop(recognition = activeDictationSession.recognition) {
+  if (recognition && activeDictationSession.recognition && activeDictationSession.recognition !== recognition) {
+    return;
+  }
+
+  if (activeDictationSession.stopTimeoutId) {
+    clearTimeout(activeDictationSession.stopTimeoutId);
+    activeDictationSession.stopTimeoutId = null;
+  }
+
+  const resolve = activeDictationSession.stopResolver;
+  activeDictationSession.stopPromise = null;
+  activeDictationSession.stopResolver = null;
+
+  if (typeof resolve === "function") {
+    resolve();
+  }
+}
+
+function finalizeActiveDictation(recognition = activeDictationSession.recognition, { preserveStatus = true, renderAfter = true } = {}) {
+  if (recognition && activeDictationSession.recognition && activeDictationSession.recognition !== recognition) {
+    return;
+  }
+
+  if (recognition) {
+    recognition.onresult = null;
+    recognition.onerror = null;
+    recognition.onend = null;
+  }
+
+  activeDictationSession.recognition = null;
+  activeDictationSession.fieldKey = "";
+  activeDictationSession.phase = "idle";
+  activeDictationSession.isListening = false;
+  activeDictationSession.pendingInterimTranscript = "";
+  activeDictationSession.stopRequested = false;
+  syncActiveDictationUiState();
+
+  if (!preserveStatus) {
+    state.statusMessage = "";
+    state.statusTone = "info";
+  }
+
+  resolveActiveDictationStop(recognition);
+
+  if (renderAfter) {
+    render();
+  }
 }
 
 function getOutcomeOptionLabel(optionKey) {
@@ -1428,10 +1539,16 @@ function renderFieldAssistantControls(field) {
   }
 
   const isReadOnly = isFormReadOnly();
-  const isListening = state.activeDictationFieldKey === field.fieldKey;
+  const isActiveField = activeDictationSession.fieldKey === field.fieldKey;
+  const isStarting = activeDictationSession.phase === "starting" && isActiveField;
+  const isListening = activeDictationSession.phase === "listening" && isActiveField;
   const isCleaning = state.cleaningFieldKey === field.fieldKey;
-  const hasActiveOtherField =
-    Boolean(state.activeDictationFieldKey) && state.activeDictationFieldKey !== field.fieldKey;
+  const dictationButtonLabel = isStarting ? "Starting..." : isListening ? "Stop" : "Dictate";
+  const dictationStateText = isStarting
+    ? "Microphone is starting. Begin speaking when ready."
+    : isListening
+      ? "Listening for this field..."
+      : "";
 
   return `
     <div class="field-assistant-row">
@@ -1445,9 +1562,9 @@ function renderFieldAssistantControls(field) {
                 class="secondary-button compact-button"
                 data-action="toggle-dictation"
                 data-field-key="${escapeHtml(field.fieldKey)}"
-                ${isReadOnly || isCleaning || hasActiveOtherField ? "disabled" : ""}
+                ${isReadOnly || isCleaning ? "disabled" : ""}
               >
-                ${escapeHtml(isListening ? "Stop" : "Dictate")}
+                ${escapeHtml(dictationButtonLabel)}
               </button>
             `
             : ""
@@ -1457,14 +1574,14 @@ function renderFieldAssistantControls(field) {
           class="secondary-button compact-button"
           data-action="clean-field-notes"
           data-field-key="${escapeHtml(field.fieldKey)}"
-          ${isReadOnly || isCleaning || isListening || Boolean(state.pendingAction) ? "disabled" : ""}
+          ${isReadOnly || isCleaning || isStarting || isListening || Boolean(state.pendingAction) ? "disabled" : ""}
         >
           ${escapeHtml(isCleaning ? "Cleaning..." : "Clean up notes")}
         </button>
       </div>
       ${
-        isListening
-          ? `<span class="field-assistant-state">Listening for this field...</span>`
+        dictationStateText
+          ? `<span class="field-assistant-state">${escapeHtml(dictationStateText)}</span>`
           : ""
       }
     </div>
@@ -2484,14 +2601,20 @@ function handleFieldInput(event) {
   state.statusMessage = "";
 }
 
-function handleToggleDictation(event) {
+async function handleToggleDictation(event) {
   const fieldKey = event.currentTarget.dataset.fieldKey;
   if (!fieldKey || isFormReadOnly()) {
     return;
   }
 
-  if (state.activeDictationFieldKey === fieldKey) {
-    stopActiveDictation();
+  recordDictationDebug("toggle", {
+    requestedFieldKey: fieldKey,
+    activeFieldKey: activeDictationSession.fieldKey,
+    isListening: activeDictationSession.isListening,
+  });
+
+  if (activeDictationSession.fieldKey === fieldKey && activeDictationSession.phase !== "idle") {
+    await stopActiveDictation();
     return;
   }
 
@@ -2502,15 +2625,15 @@ function handleToggleDictation(event) {
     return;
   }
 
-  if (state.activeDictationFieldKey) {
-    return;
-  }
-
-  startDictation(fieldKey);
+  await startDictation(fieldKey);
 }
 
-function startDictation(fieldKey) {
+async function startDictation(fieldKey) {
   const RecognitionConstructor = getSpeechRecognitionConstructor();
+  recordDictationDebug("support-check", {
+    supported: Boolean(RecognitionConstructor),
+    requestedFieldKey: fieldKey,
+  });
   if (!RecognitionConstructor) {
     state.statusMessage = VOICE_INPUT_UNSUPPORTED_MESSAGE;
     state.statusTone = "warning";
@@ -2518,84 +2641,325 @@ function startDictation(fieldKey) {
     return;
   }
 
+  if (activeDictationSession.recognition) {
+    await stopActiveDictation({ preserveStatus: true, renderAfter: false });
+  }
+
   const recognition = new RecognitionConstructor();
   recognition.lang = "en-US";
-  recognition.continuous = true;
-  recognition.interimResults = false;
+  recognition.continuous = false;
+  recognition.interimResults = true;
   recognition.maxAlternatives = 1;
+  activeDictationSession.pendingInterimTranscript = "";
 
-  recognition.onresult = (resultEvent) => {
-    const transcriptParts = [];
-    for (let index = resultEvent.resultIndex; index < resultEvent.results.length; index += 1) {
-      const result = resultEvent.results[index];
-      if (result.isFinal && result[0]?.transcript) {
-        transcriptParts.push(result[0].transcript.trim());
-      }
-    }
-
-    const transcript = transcriptParts.join(" ").trim();
-    if (!transcript) {
-      return;
-    }
-
-    appendTranscriptToField(fieldKey, transcript);
-    state.statusMessage = "Voice transcript appended. Review and edit before saving or generating.";
+  recognition.onstart = () => {
+    activeDictationSession.phase = "listening";
+    activeDictationSession.isListening = true;
+    syncActiveDictationUiState();
+    state.statusMessage = DICTATION_STATUS_READY;
     state.statusTone = "info";
+    recordDictationDebug("onstart", {
+      fieldKey,
+      phase: activeDictationSession.phase,
+      activeFieldKey: activeDictationSession.fieldKey,
+      isListening: activeDictationSession.isListening,
+    });
     render();
   };
 
+  recognition.onaudiostart = () => {
+    recordDictationDebug("onaudiostart", {
+      fieldKey,
+      activeFieldKey: activeDictationSession.fieldKey,
+    });
+  };
+
+  recognition.onsoundstart = () => {
+    recordDictationDebug("onsoundstart", {
+      fieldKey,
+      activeFieldKey: activeDictationSession.fieldKey,
+    });
+  };
+
+  recognition.onspeechstart = () => {
+    recordDictationDebug("onspeechstart", {
+      fieldKey,
+      activeFieldKey: activeDictationSession.fieldKey,
+    });
+  };
+
+  recognition.onsoundend = () => {
+    recordDictationDebug("onsoundend", {
+      fieldKey,
+      activeFieldKey: activeDictationSession.fieldKey,
+    });
+  };
+
+  recognition.onaudioend = () => {
+    recordDictationDebug("onaudioend", {
+      fieldKey,
+      activeFieldKey: activeDictationSession.fieldKey,
+    });
+  };
+
+  recognition.onspeechend = () => {
+    recordDictationDebug("onspeechend", {
+      fieldKey,
+      activeFieldKey: activeDictationSession.fieldKey,
+      pendingInterimLength: activeDictationSession.pendingInterimTranscript.length,
+    });
+  };
+
+  recognition.onresult = (resultEvent) => {
+    const isStaleRecognition = activeDictationSession.recognition !== recognition;
+    const hasFieldMismatch = activeDictationSession.fieldKey !== fieldKey;
+    const resultsSummary = summarizeSpeechRecognitionResults(resultEvent?.results);
+
+    recordDictationDebug(
+      "onresult",
+      {
+        fieldKey,
+        activeFieldKey: activeDictationSession.fieldKey,
+        isListening: activeDictationSession.isListening,
+        isStaleRecognition,
+        hasFieldMismatch,
+        resultIndex: resultEvent?.resultIndex ?? 0,
+        resultsSummary,
+      },
+      resultEvent?.results,
+    );
+
+    if (isStaleRecognition || hasFieldMismatch) {
+      recordDictationDebug("onresult-ignored", {
+        fieldKey,
+        activeFieldKey: activeDictationSession.fieldKey,
+        isStaleRecognition,
+        hasFieldMismatch,
+      });
+      return;
+    }
+
+    const finalTranscriptParts = [];
+    const interimTranscriptParts = [];
+    for (let index = resultEvent.resultIndex; index < resultEvent.results.length; index += 1) {
+      const result = resultEvent.results[index];
+      const transcript = String(result?.[0]?.transcript || "").trim();
+      if (!transcript) {
+        continue;
+      }
+      if (result.isFinal) {
+        finalTranscriptParts.push(transcript);
+      } else {
+        interimTranscriptParts.push(transcript);
+      }
+    }
+
+    const finalTranscript = finalTranscriptParts.join(" ").trim();
+    const interimTranscript = interimTranscriptParts.join(" ").trim();
+
+    recordDictationDebug("transcript-extracted", {
+      fieldKey,
+      finalTranscript,
+      interimTranscript,
+      hasFinalTranscript: Boolean(finalTranscript),
+      hasInterimTranscript: Boolean(interimTranscript),
+    });
+
+    if (finalTranscript) {
+      const appendDetails = appendTranscriptToField(fieldKey, finalTranscript);
+      activeDictationSession.pendingInterimTranscript = "";
+      recordDictationDebug("append-final-transcript", appendDetails);
+      if (appendDetails.appended) {
+        state.statusMessage = "Voice transcript appended. Review and edit before saving or generating.";
+        state.statusTone = "info";
+        render();
+      }
+      return;
+    }
+
+    if (interimTranscript) {
+      activeDictationSession.pendingInterimTranscript = interimTranscript;
+      recordDictationDebug("store-interim-transcript", {
+        fieldKey,
+        interimTranscript,
+        interimLength: interimTranscript.length,
+      });
+    }
+  };
+
   recognition.onerror = (recognitionError) => {
-    stopActiveDictation({ preserveStatus: true });
-    state.statusMessage = formatSpeechRecognitionError(recognitionError?.error);
-    state.statusTone = "warning";
+    if (activeDictationSession.recognition !== recognition) {
+      return;
+    }
+
+    const errorCode = recognitionError?.error;
+    const pendingInterimTranscript = activeDictationSession.pendingInterimTranscript.trim();
+    const shouldSuppressMessage = activeDictationSession.stopRequested;
+
+    recordDictationDebug("onerror", {
+      fieldKey,
+      activeFieldKey: activeDictationSession.fieldKey,
+      errorCode,
+      stopRequested: activeDictationSession.stopRequested,
+      pendingInterimLength: pendingInterimTranscript.length,
+    });
+
+    if (pendingInterimTranscript) {
+      const appendDetails = appendTranscriptToField(fieldKey, pendingInterimTranscript);
+      activeDictationSession.pendingInterimTranscript = "";
+      recordDictationDebug("append-interim-transcript-onerror", appendDetails);
+      if (appendDetails.appended) {
+        state.statusMessage = "Partial voice transcript appended. Review and edit before saving or generating.";
+        state.statusTone = "info";
+      }
+    }
+
+    finalizeActiveDictation(recognition, { preserveStatus: true, renderAfter: false });
+
+    if (!shouldSuppressMessage && (!state.statusMessage || isTransientDictationStatusMessage(state.statusMessage))) {
+      state.statusMessage = formatSpeechRecognitionError(errorCode);
+      state.statusTone = "warning";
+    }
+
     render();
   };
 
   recognition.onend = () => {
-    if (activeSpeechRecognition !== recognition) {
+    if (activeDictationSession.recognition !== recognition) {
       return;
     }
-    activeSpeechRecognition = null;
-    state.activeDictationFieldKey = "";
+
+    const pendingInterimTranscript = activeDictationSession.pendingInterimTranscript.trim();
+    recordDictationDebug("onend", {
+      fieldKey,
+      activeFieldKey: activeDictationSession.fieldKey,
+      stopRequested: activeDictationSession.stopRequested,
+      pendingInterimLength: pendingInterimTranscript.length,
+    });
+
+    if (pendingInterimTranscript) {
+      const appendDetails = appendTranscriptToField(fieldKey, pendingInterimTranscript);
+      activeDictationSession.pendingInterimTranscript = "";
+      recordDictationDebug("append-interim-transcript-onend", appendDetails);
+      if (appendDetails.appended) {
+        state.statusMessage = "Partial voice transcript appended. Review and edit before saving or generating.";
+        state.statusTone = "info";
+      }
+    }
+
+    const preserveStatus = !activeDictationSession.stopRequested;
+    finalizeActiveDictation(recognition, { preserveStatus, renderAfter: false });
     render();
   };
 
   try {
-    activeSpeechRecognition = recognition;
-    state.activeDictationFieldKey = fieldKey;
-    state.statusMessage = "";
+    activeDictationSession.recognition = recognition;
+    activeDictationSession.fieldKey = fieldKey;
+    activeDictationSession.phase = "starting";
+    activeDictationSession.isListening = false;
+    activeDictationSession.pendingInterimTranscript = "";
+    activeDictationSession.stopRequested = false;
+    syncActiveDictationUiState();
+    state.statusMessage = DICTATION_STATUS_STARTING;
+    state.statusTone = "info";
+    recordDictationDebug("start-called", {
+      fieldKey,
+      phase: activeDictationSession.phase,
+      activeFieldKey: activeDictationSession.fieldKey,
+      isListening: activeDictationSession.isListening,
+    });
     render();
     recognition.start();
   } catch (error) {
-    activeSpeechRecognition = null;
-    state.activeDictationFieldKey = "";
+    finalizeActiveDictation(recognition, { preserveStatus: true, renderAfter: false });
+    recordDictationDebug("start-error", {
+      fieldKey,
+      message: getErrorMessage(error),
+    });
     state.statusMessage = `Voice input could not start: ${getErrorMessage(error)}`;
     state.statusTone = "warning";
     render();
   }
 }
 
-function stopActiveDictation({ preserveStatus = false, renderAfter = true } = {}) {
-  const recognition = activeSpeechRecognition;
-  activeSpeechRecognition = null;
-  state.activeDictationFieldKey = "";
+async function stopActiveDictation({ preserveStatus = false, renderAfter = true } = {}) {
+  const recognition = activeDictationSession.recognition;
+  recordDictationDebug("stop-requested", {
+    activeFieldKey: activeDictationSession.fieldKey,
+    hasRecognition: Boolean(recognition),
+    preserveStatus,
+  });
 
   if (!preserveStatus) {
     state.statusMessage = "";
+    state.statusTone = "info";
   }
 
-  if (recognition) {
-    recognition.onresult = null;
-    recognition.onerror = null;
-    recognition.onend = null;
-    try {
-      recognition.stop();
-    } catch (_error) {
-      // Ignore stop errors from browsers that already ended recognition.
+  if (!recognition) {
+    activeDictationSession.fieldKey = "";
+    activeDictationSession.phase = "idle";
+    activeDictationSession.isListening = false;
+    activeDictationSession.pendingInterimTranscript = "";
+    activeDictationSession.stopRequested = false;
+    syncActiveDictationUiState();
+    resolveActiveDictationStop();
+    if (renderAfter) {
+      render();
     }
+    return;
   }
+
+  activeDictationSession.phase = "stopping";
+  activeDictationSession.isListening = false;
+  syncActiveDictationUiState();
+
+  if (activeDictationSession.stopPromise) {
+    if (renderAfter) {
+      render();
+    }
+    await activeDictationSession.stopPromise;
+    return;
+  }
+
+  activeDictationSession.stopRequested = true;
+  activeDictationSession.stopPromise = new Promise((resolve) => {
+    activeDictationSession.stopResolver = resolve;
+  });
 
   if (renderAfter) {
+    render();
+  }
+
+  try {
+    recognition.stop();
+  } catch (_error) {
+    try {
+      recognition.abort?.();
+    } catch (_abortError) {
+      // Ignore browsers that reject abort after recognition already ended.
+    }
+    finalizeActiveDictation(recognition, { preserveStatus: true, renderAfter });
+    return;
+  }
+
+  activeDictationSession.stopTimeoutId = window.setTimeout(() => {
+    if (activeDictationSession.recognition === recognition) {
+      recordDictationDebug("stop-timeout-finalize", {
+        activeFieldKey: activeDictationSession.fieldKey,
+        preserveStatus,
+      });
+      try {
+        recognition.abort?.();
+      } catch (_abortError) {
+        // Ignore browsers that reject abort after recognition already ended.
+      }
+      finalizeActiveDictation(recognition, { preserveStatus: true, renderAfter });
+    }
+  }, 5000);
+
+  await activeDictationSession.stopPromise;
+
+  if (renderAfter && activeDictationSession.recognition) {
     render();
   }
 }
@@ -2603,9 +2967,21 @@ function stopActiveDictation({ preserveStatus = false, renderAfter = true } = {}
 function appendTranscriptToField(fieldKey, transcript) {
   const currentValue = String(state.answers[fieldKey] ?? "");
   const nextValue = joinFieldTextAndTranscript(currentValue, transcript);
+  const oldLength = currentValue.length;
+  const newLength = nextValue.length;
   state.answers[fieldKey] = nextValue;
   delete state.validationErrors[fieldKey];
   delete state.aiInferences[fieldKey];
+  return {
+    fieldKey,
+    oldLength,
+    newLength,
+    appended: nextValue !== currentValue,
+  };
+}
+
+function isTransientDictationStatusMessage(message = "") {
+  return message === DICTATION_STATUS_STARTING || message === DICTATION_STATUS_READY;
 }
 
 function joinFieldTextAndTranscript(existingText, transcript) {
@@ -2628,7 +3004,7 @@ function formatSpeechRecognitionError(errorCode) {
     return "Microphone permission was blocked. Allow microphone access and try again.";
   }
   if (normalizedCode === "no-speech") {
-    return "No speech was detected. Try again and speak more clearly.";
+    return "No speech detected. Please try again.";
   }
   if (normalizedCode === "audio-capture") {
     return "No microphone was found for voice input. Check your device settings and try again.";
