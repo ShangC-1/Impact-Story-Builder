@@ -1479,16 +1479,7 @@ function getModelPlaceholder() {
 
 function renderQuestionStep(step) {
   const fields = step.fields ?? [];
-  const voiceCapableFields = getVoiceCapableFields(step);
-  const voiceNoteMarkup = voiceCapableFields.length
-    ? `
-      <div class="voice-note-banner ${supportsVoiceInput() ? "" : "voice-note-banner-warning"}">
-        ${escapeHtml(supportsVoiceInput() ? VOICE_INPUT_PRIVACY_NOTE : VOICE_INPUT_UNSUPPORTED_MESSAGE)}
-      </div>
-    `
-    : "";
   return `
-    ${voiceNoteMarkup}
     <div class="field-list">
       ${fields.map((field) => renderField(field)).join("")}
     </div>
@@ -1538,52 +1529,25 @@ function renderFieldAssistantControls(field) {
     return "";
   }
 
+  // Browser SpeechRecognition was tested across the demo setup and intentionally
+  // disabled in the UI because transcript capture was not reliable enough.
   const isReadOnly = isFormReadOnly();
-  const isActiveField = activeDictationSession.fieldKey === field.fieldKey;
-  const isStarting = activeDictationSession.phase === "starting" && isActiveField;
-  const isListening = activeDictationSession.phase === "listening" && isActiveField;
   const isCleaning = state.cleaningFieldKey === field.fieldKey;
-  const dictationButtonLabel = isStarting ? "Starting..." : isListening ? "Stop" : "Dictate";
-  const dictationStateText = isStarting
-    ? "Microphone is starting. Begin speaking when ready."
-    : isListening
-      ? "Listening for this field..."
-      : "";
 
   return `
     <div class="field-assistant-row">
       <span class="field-assistant-label">Notes tools</span>
       <div class="field-assistant-actions">
-        ${
-          supportsVoiceInput()
-            ? `
-              <button
-                type="button"
-                class="secondary-button compact-button"
-                data-action="toggle-dictation"
-                data-field-key="${escapeHtml(field.fieldKey)}"
-                ${isReadOnly || isCleaning ? "disabled" : ""}
-              >
-                ${escapeHtml(dictationButtonLabel)}
-              </button>
-            `
-            : ""
-        }
         <button
           type="button"
           class="secondary-button compact-button"
           data-action="clean-field-notes"
           data-field-key="${escapeHtml(field.fieldKey)}"
-          ${isReadOnly || isCleaning || isStarting || isListening || Boolean(state.pendingAction) ? "disabled" : ""}
+          ${isReadOnly || isCleaning || Boolean(state.pendingAction) ? "disabled" : ""}
         >
           ${escapeHtml(isCleaning ? "Cleaning..." : "Clean up notes")}
         </button>
       </div>
-      ${
-        dictationStateText
-          ? `<span class="field-assistant-state">${escapeHtml(dictationStateText)}</span>`
-          : ""
-      }
     </div>
   `;
 }

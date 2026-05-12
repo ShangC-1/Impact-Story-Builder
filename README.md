@@ -15,6 +15,8 @@ Schema-driven interview prototype for drafting SEI impact stories.
   - `claude`
   - `openai_compatible`
 
+Browser `SpeechRecognition` dictation was tested and is currently disabled in the user-facing UI for demo reliability. `Clean up notes` remains available in the workspace.
+
 ## Local run
 
 1. Copy `.env.example` to `.env`.
