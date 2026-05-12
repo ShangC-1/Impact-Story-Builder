@@ -6,8 +6,14 @@ const state = {
   currentUser: null,
   myInterviews: [],
   sharedInterviews: [],
+  allInterviews: [],
   myInterviewSort: "updated_desc",
+  currentView: "home",
+  dashboardActiveTab: "mine",
+  dashboardSearch: "",
+  dashboardStatusFilter: "all",
   dashboardEditingTitles: {},
+  dashboardRenamingInterviewId: "",
   pendingInterviewId: "",
   activeInterviewId: "",
   currentInterviewProjectName: "",
@@ -98,6 +104,7 @@ const VOICE_INPUT_PRIVACY_NOTE =
   "Voice input creates a draft transcript. Please review and edit before saving or generating.";
 const VOICE_INPUT_UNSUPPORTED_MESSAGE =
   "Voice input is not supported in this browser. Please use Chrome or Edge, or type manually.";
+const SHARED_READ_ONLY_NOTICE = "This shared story is read-only. Copy it to My stories to edit your own version.";
 let activeSpeechRecognition = null;
 
 bootstrap();
@@ -139,8 +146,14 @@ function initializeState(schema, backendHealth, currentUser) {
   state.currentUser = currentUser;
   state.myInterviews = [];
   state.sharedInterviews = [];
+  state.allInterviews = [];
   state.myInterviewSort = "updated_desc";
+  state.currentView = currentUser && state.pendingInterviewId ? "workspace" : "home";
+  state.dashboardActiveTab = "mine";
+  state.dashboardSearch = "";
+  state.dashboardStatusFilter = "all";
   state.dashboardEditingTitles = {};
+  state.dashboardRenamingInterviewId = "";
   state.statusMessage = "";
   state.statusTone = "info";
   state.dashboardStatusMessage = "";
@@ -402,6 +415,7 @@ function applyInterviewDraft(interview) {
   state.reviewReturnStepIndex =
     interview.reviewReturnStepIndex == null ? null : normalizeSavedStepIndex(interview.reviewReturnStepIndex, answers);
   state.currentStepIndex = normalizeSavedStepIndex(interview.currentStepIndex, answers);
+  state.currentView = "workspace";
 
   setInterviewIdInUrl(state.activeInterviewId);
 }
@@ -475,31 +489,35 @@ async function loadInterviewDraft(interviewId, options = {}) {
 }
 
 async function refreshInterviewDashboard() {
-  const [mineResponse, sharedResponse] = await Promise.all([
+  const [mineResponse, allResponse] = await Promise.all([
     fetchJson("/api/interviews?scope=mine"),
-    fetchJson("/api/interviews?scope=shared"),
+    fetchJson("/api/interviews?scope=all"),
   ]);
   state.myInterviews = mineResponse.interviews ?? [];
-  state.sharedInterviews = sharedResponse.interviews ?? [];
+  state.allInterviews = allResponse.interviews ?? [];
+  state.sharedInterviews = state.allInterviews.filter(
+    (interview) => interview.visibility === "shared" && !interview.isOwner,
+  );
   state.dashboardEditingTitles = {};
+  state.dashboardRenamingInterviewId = "";
 }
 
 function isFormReadOnly() {
   return !state.currentInterviewCanEdit;
 }
 
-function getSortedMyInterviews() {
-  const interviews = [...state.myInterviews];
+function sortDashboardInterviews(interviews) {
+  const sortedInterviews = [...interviews];
   switch (state.myInterviewSort) {
     case "updated_asc":
-      return interviews.sort((left, right) => compareDateValues(left.updatedAt, right.updatedAt));
+      return sortedInterviews.sort((left, right) => compareDateValues(left.updatedAt, right.updatedAt));
     case "title_asc":
-      return interviews.sort((left, right) => compareTitleValues(left.projectName, right.projectName));
+      return sortedInterviews.sort((left, right) => compareTitleValues(left.projectName, right.projectName));
     case "title_desc":
-      return interviews.sort((left, right) => compareTitleValues(right.projectName, left.projectName));
+      return sortedInterviews.sort((left, right) => compareTitleValues(right.projectName, left.projectName));
     case "updated_desc":
     default:
-      return interviews.sort((left, right) => compareDateValues(right.updatedAt, left.updatedAt));
+      return sortedInterviews.sort((left, right) => compareDateValues(right.updatedAt, left.updatedAt));
   }
 }
 
@@ -548,172 +566,164 @@ function formatDateTime(value) {
   });
 }
 
+function getCurrentView() {
+  if (!state.currentUser) {
+    return "home";
+  }
+  if (state.currentView === "workspace") {
+    return "workspace";
+  }
+  if (state.currentView === "dashboard") {
+    return "dashboard";
+  }
+  return "home";
+}
+
+function getWorkspaceTitle() {
+  return (
+    normalizeAnswer(state.currentInterviewProjectName) ||
+    normalizeAnswer(state.answers.project_name_location) ||
+    "New story workspace"
+  );
+}
+
+function getDashboardTabInterviews(tabKey = state.dashboardActiveTab) {
+  if (tabKey === "shared") {
+    return sortDashboardInterviews(state.sharedInterviews);
+  }
+  if (tabKey === "all") {
+    return sortDashboardInterviews(state.allInterviews);
+  }
+  return sortDashboardInterviews(state.myInterviews);
+}
+
+function getFilteredDashboardInterviews(tabKey = state.dashboardActiveTab) {
+  const query = normalizeSearchQuery(state.dashboardSearch);
+  const statusFilter = state.dashboardStatusFilter;
+
+  return getDashboardTabInterviews(tabKey).filter((interview) => {
+    if (statusFilter !== "all" && interview.draftStatus !== statusFilter) {
+      return false;
+    }
+
+    if (!query) {
+      return true;
+    }
+
+    const searchable = [
+      interview.projectName,
+      interview.ownerEmail,
+      interview.visibility,
+      interview.draftStatus,
+    ]
+      .map((value) => String(value || "").toLowerCase())
+      .join(" ");
+
+    return searchable.includes(query);
+  });
+}
+
+function getDashboardTabCount(tabKey) {
+  return getDashboardTabInterviews(tabKey).length;
+}
+
+function getDashboardTabLabel(tabKey) {
+  if (tabKey === "shared") {
+    return "Shared with me";
+  }
+  if (tabKey === "all") {
+    return "All stories";
+  }
+  return "My stories";
+}
+
+function getDashboardEmptyMessage() {
+  if (state.dashboardSearch || state.dashboardStatusFilter !== "all") {
+    return `No stories match the current filters in ${getDashboardTabLabel(state.dashboardActiveTab).toLowerCase()}.`;
+  }
+
+  if (state.dashboardActiveTab === "shared") {
+    return "No stories have been shared with you yet.";
+  }
+  if (state.dashboardActiveTab === "all") {
+    return "No stories are available yet.";
+  }
+  return "No saved stories yet. Start a new story to create your first draft.";
+}
+
+function sortInterviewsByUpdatedDesc(interviews) {
+  return [...interviews].sort((left, right) => compareDateValues(right.updatedAt, left.updatedAt));
+}
+
+function normalizeSearchQuery(value) {
+  return String(value || "").trim().toLowerCase();
+}
+
+function formatVisibilityLabel(visibility) {
+  return visibility === "shared" ? "Shared" : "Private";
+}
+
+function getCompletedFieldCount() {
+  let completed = 0;
+  for (const field of getAllFields()) {
+    const value = state.answers[field.fieldKey];
+    const hasValue =
+      field.inputType === "multi_select_cards"
+        ? normalizeOutcomeSelection(value).length > 0
+        : Boolean(normalizeAnswer(value));
+    if (hasValue) {
+      completed += 1;
+    }
+  }
+  return completed;
+}
+
 function render() {
   if (state.loading) {
     appRoot.innerHTML = `
-      <section class="loading-state">
-        <p class="eyebrow">Impact Story Builder</p>
-        <h1>Loading provider-aware prototype</h1>
-        <p>The interface is loading the interview schema and local backend defaults.</p>
-      </section>
+      <div class="app-layout public-layout">
+        ${renderPublicBrandBar()}
+        <section class="loading-state">
+          <p class="eyebrow">Impact Story Builder</p>
+          <h1>Loading the workspace</h1>
+          <p>The interface is loading the interview schema and local backend defaults.</p>
+        </section>
+      </div>
     `;
     return;
   }
 
   if (state.loadError) {
     appRoot.innerHTML = `
-      <section class="error-state">
-        <p class="eyebrow">Impact Story Builder</p>
-        <h1>Unable to load the app</h1>
-        <p>${escapeHtml(state.loadError)}</p>
-        <p>Start the local Phase 2 server with <code>scripts/start-demo.ps1</code>.</p>
-      </section>
+      <div class="app-layout public-layout">
+        ${renderPublicBrandBar()}
+        <section class="error-state">
+          <p class="eyebrow">Impact Story Builder</p>
+          <h1>Unable to load the app</h1>
+          <p>${escapeHtml(state.loadError)}</p>
+          <p>Start the local Phase 2 server with <code>scripts/start-demo.ps1</code>.</p>
+        </section>
+      </div>
     `;
     return;
   }
 
   if (state.backendHealth?.authMode === "manual_invite" && !state.currentUser) {
-    appRoot.innerHTML = renderManualInviteLogin();
+    appRoot.innerHTML = `
+      <div class="app-layout public-layout">
+        ${renderPublicBrandBar()}
+        ${renderManualInviteLogin()}
+      </div>
+    `;
     attachListeners();
     return;
   }
 
-  const steps = getSteps();
-  const currentStep = getCurrentStep();
-  const isReviewStep = currentStep.stepKey === "review_and_generate";
-  const isBusy = Boolean(state.pendingAction);
-  const nextLabel = state.pendingAction === "analyzing" ? "Analyzing..." : "Next";
-  const generateLabel = state.pendingAction === "generating" ? "Generating..." : "Generate my impact story";
-  const conciseLabel =
-    state.pendingAction === "generating_concise" ? "Creating concise version..." : "Create concise LinkedIn-style version";
-  const testLabel = state.pendingAction === "testing_provider" ? "Testing..." : "Test connection";
-  const saveLabel = state.pendingAction === "saving_draft" ? "Saving..." : "Save Draft";
-  const isReadOnly = isFormReadOnly();
-  const showReturnToReview = state.reviewReturnStepIndex === steps.length - 1 && state.currentStepIndex < steps.length - 1;
-
   appRoot.innerHTML = `
-    ${renderSettingsPanel(testLabel, isBusy)}
-
-    <section class="session-card">
-      <div>
-        <p class="section-kicker">Session</p>
-        <h2>Signed in as ${escapeHtml(state.currentUser?.email || "unknown user")}.</h2>
-      </div>
-      <div class="session-meta">
-        <span class="meta-pill">${escapeHtml(state.currentUser?.role || "editor")}</span>
-        ${
-          state.activeInterviewId
-            ? `<span class="meta-pill meta-pill-neutral">Draft linked</span>`
-            : `<span class="meta-pill meta-pill-neutral">No draft saved yet</span>`
-        }
-        ${
-          state.backendHealth?.authMode === "manual_invite"
-            ? `<button type="button" class="secondary-button compact-button" data-action="logout" ${isBusy ? "disabled" : ""}>Logout</button>`
-            : ""
-        }
-      </div>
-    </section>
-
-    ${renderDashboard(isBusy)}
-
-    <section class="hero-card">
-      <div class="hero-copy">
-        <p class="eyebrow">Phase 2 Prototype</p>
-        <h1>Impact Story Builder</h1>
-        <p class="hero-text">
-          A schema-driven interview flow with a local AI provider panel. The browser never stores the API key, and all external AI calls remain server-side.
-        </p>
-      </div>
-      <div class="hero-meta">
-        <span class="meta-pill ${escapeHtml(getCurrentModeClass())}">${escapeHtml(getCurrentModeLabel())}</span>
-        <span class="meta-pill">${escapeHtml(getEffectiveModelLabel())}</span>
-        <span class="meta-pill">Server-side AI</span>
-      </div>
-    </section>
-
-    <section class="progress-card">
-      <div class="progress-summary">
-        <div>
-          <p class="section-kicker">Progress</p>
-          <h2>Step ${state.currentStepIndex + 1} of ${steps.length}</h2>
-        </div>
-        <p class="progress-step-name">${escapeHtml(currentStep.title)}</p>
-      </div>
-      <div class="progress-bar" aria-hidden="true">
-        <span style="width: ${((state.currentStepIndex + 1) / steps.length) * 100}%"></span>
-      </div>
-      <ol class="progress-steps">
-        ${steps
-          .map((step, index) => {
-            const status =
-              index === state.currentStepIndex ? "current" : index < state.currentStepIndex ? "complete" : "upcoming";
-            return `
-              <li class="progress-step progress-step-${status}">
-                <span class="progress-step-number">${index + 1}</span>
-                <div>
-                  <p>${escapeHtml(step.title)}</p>
-                  <small>${escapeHtml(step.stepKey.replaceAll("_", " "))}</small>
-                </div>
-              </li>
-            `;
-          })
-          .join("")}
-      </ol>
-    </section>
-
-    <section class="step-card" ${isBusy ? 'aria-busy="true"' : ""}>
-      <div class="step-header">
-        <div>
-          <p class="section-kicker">${escapeHtml(currentStep.stepKey.replaceAll("_", " "))}</p>
-          <h2>${escapeHtml(currentStep.title)}</h2>
-        </div>
-        <span class="step-badge">Step ${currentStep.stepNumber}</span>
-      </div>
-      <p class="step-purpose">${escapeHtml(currentStep.purpose)}</p>
-
-      ${
-        isReadOnly && state.activeInterviewId
-          ? `<div class="status-banner status-warning">
-              This shared interview is read-only. Copy to My Drafts to edit your own version.
-              <button type="button" class="secondary-button inline-banner-button" data-action="copy-interview" data-interview-id="${escapeHtml(state.activeInterviewId)}" ${isBusy ? "disabled" : ""}>Copy to My Drafts</button>
-            </div>`
-          : ""
-      }
-
-      ${
-        state.statusMessage
-          ? `<div class="status-banner status-${escapeHtml(state.statusTone)}">${escapeHtml(state.statusMessage)}</div>`
-          : ""
-      }
-
-      ${isReviewStep ? renderReviewStep() : renderQuestionStep(currentStep)}
-
-      <div class="step-actions">
-        <div class="step-actions-left">
-          <button
-            type="button"
-            class="secondary-button"
-            data-action="back"
-            ${state.currentStepIndex === 0 || isBusy ? "disabled" : ""}
-          >
-            Back
-          </button>
-          <button type="button" class="secondary-button" data-action="save-draft" ${isBusy || isReadOnly ? "disabled" : ""}>
-            ${escapeHtml(saveLabel)}
-          </button>
-          ${
-            showReturnToReview
-              ? `<button type="button" class="secondary-button" data-action="return-to-review" ${isBusy ? "disabled" : ""}>Return to Review</button>`
-              : ""
-          }
-        </div>
-        ${
-          isReviewStep
-            ? `<button type="button" class="primary-button" data-action="generate" ${isBusy || isReadOnly ? "disabled" : ""}>${escapeHtml(generateLabel)}</button>`
-            : `<button type="button" class="primary-button" data-action="next" ${isBusy ? "disabled" : ""}>${escapeHtml(nextLabel)}</button>`
-        }
-      </div>
-    </section>
+    <div class="app-layout">
+      ${renderGlobalNavigation()}
+      <main class="page-stack">${renderCurrentView()}</main>
+    </div>
   `;
 
   attachListeners();
@@ -721,6 +731,140 @@ function render() {
   if (state.activeDictationFieldKey && !document.getElementById(state.activeDictationFieldKey)) {
     stopActiveDictation({ preserveStatus: true });
   }
+}
+
+function renderPublicBrandBar() {
+  return `
+    <header class="top-nav top-nav-public">
+      <div class="brand-lockup">
+        <div>
+          <p class="brand-byline">by SEI</p>
+          <h1 class="brand-title">Impact Story Builder</h1>
+        </div>
+      </div>
+    </header>
+  `;
+}
+
+function renderGlobalNavigation() {
+  const currentView = getCurrentView();
+  const navItems = [
+    { key: "home", label: "Home" },
+    { key: "dashboard", label: "Dashboard" },
+    { key: "workspace", label: "Workspace" },
+  ];
+
+  return `
+    <header class="top-nav">
+      <button type="button" class="brand-lockup brand-button" data-action="navigate-view" data-view="home">
+        <div>
+          <p class="brand-byline">by SEI</p>
+          <h1 class="brand-title">Impact Story Builder</h1>
+        </div>
+      </button>
+      <nav class="main-nav" aria-label="Primary">
+        ${navItems
+          .map(
+            (item) => `
+              <button
+                type="button"
+                class="nav-link ${currentView === item.key ? "nav-link-active" : ""}"
+                data-action="navigate-view"
+                data-view="${item.key}"
+              >
+                ${escapeHtml(item.label)}
+              </button>
+            `,
+          )
+          .join("")}
+      </nav>
+      <div class="nav-meta">
+        <span class="meta-pill ${escapeHtml(getCurrentModeClass())}">${escapeHtml(getCurrentModeLabel())}</span>
+        <span class="nav-user-chip">${escapeHtml(state.currentUser?.email || "unknown user")}</span>
+        ${
+          state.backendHealth?.authMode === "manual_invite"
+            ? `<button type="button" class="secondary-button compact-button" data-action="logout" ${state.pendingAction ? "disabled" : ""}>Logout</button>`
+            : ""
+        }
+      </div>
+    </header>
+  `;
+}
+
+function renderCurrentView() {
+  const isBusy = Boolean(state.pendingAction);
+  const currentView = getCurrentView();
+
+  if (currentView === "dashboard") {
+    return renderDashboardView(isBusy);
+  }
+  if (currentView === "workspace") {
+    return renderWorkspaceView(isBusy);
+  }
+  return renderHomeView(isBusy);
+}
+
+function renderHomeView(isBusy) {
+  return `
+    <div class="home-shell">
+      <section class="page-hero home-hero home-hero-centered">
+        <div class="hero-copy home-hero-copy">
+          <p class="eyebrow">Structured storytelling workspace</p>
+          <h1 class="home-hero-title">
+            <span class="home-hero-primary">Turn project outcomes into</span>
+            <span class="home-hero-accent">compelling stories</span>
+          </h1>
+          <p class="hero-text home-hero-text">
+            A guided interview that helps SEI teams capture what happened, why it matters, and who it reached, then generates a polished impact story draft in minutes.
+          </p>
+          <div class="hero-actions home-hero-actions">
+            <button type="button" class="primary-button" data-action="new-interview" ${isBusy ? "disabled" : ""}>Start a new story</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="content-card home-section-card">
+        <div class="section-header-block home-section-header">
+          <div>
+            <p class="section-kicker">How it works</p>
+            <h2>Interview flow</h2>
+          </div>
+          <p class="section-supporting-copy">A guided path from raw notes to a draft that can still be reviewed, edited, copied, and shared inside the current app.</p>
+        </div>
+        <div class="process-grid">
+          ${renderProcessCard("1", "Project details", "Name, location, and what SEI did. Paste existing documents to prefill where useful.")}
+          ${renderProcessCard("2", "Outcomes & impact", "What changed, who benefited, at what scale, and what made it possible.")}
+          ${renderProcessCard("3", "Evidence & voice", "Quotes, statistics, and future potential to support the story with credible detail.")}
+          ${renderProcessCard("4", "Review & generate", "Review all answers, edit, and generate an editable impact story draft.")}
+        </div>
+      </section>
+
+      <section class="content-card example-card">
+        <div class="section-header-block home-section-header">
+          <div>
+            <p class="section-kicker">What you’ll get</p>
+            <h2>Volta Basin style output</h2>
+          </div>
+          <p class="section-supporting-copy">A structured narrative ready for your website, reports, or LinkedIn, based on your real project data.</p>
+        </div>
+        <div class="example-story-card example-story-card-wide">
+          <p class="example-story">
+            <strong>Volta Basin Water Security</strong> demonstrates how SEI translated technical collaboration into visible impact. Through this work, the team built a WEAP model, ran capacity-building workshops with government staff, and co-authored a policy brief with the Ministry of Water. Government agencies now use the model as the basis for water allocation decisions, benefiting communities across the basin.
+          </p>
+        </div>
+      </section>
+    </div>
+  `;
+}
+
+function renderProcessCard(number, title, description) {
+  return `
+    <article class="process-card">
+      <span class="process-number">${escapeHtml(number)}</span>
+      <h3>${escapeHtml(title)}</h3>
+      <p>${escapeHtml(description)}</p>
+    </article>
+  `;
 }
 
 function renderManualInviteLogin() {
@@ -731,7 +875,7 @@ function renderManualInviteLogin() {
       : "";
 
   return `
-    <section class="hero-card">
+    <section class="page-hero home-hero auth-hero">
       <div class="hero-copy">
         <p class="eyebrow">Manual Invite Pilot</p>
         <h1>Impact Story Builder</h1>
@@ -743,14 +887,10 @@ function renderManualInviteLogin() {
       <div>
         <p class="section-kicker">Sign In</p>
         <h2>Enter your invite details</h2>
-        <p class="field-hint">This demo mode is for short-term internal testing only. Your email is used as the draft owner identity for shared interviews.</p>
+        <p class="field-hint">This demo mode is for short-term internal testing only. Your email is used as the owner identity for saved and shared stories.</p>
       </div>
       ${healthNote}
-      ${
-        state.authStatusMessage
-          ? `<div class="status-banner status-${escapeHtml(state.authStatusTone)}">${escapeHtml(state.authStatusMessage)}</div>`
-          : ""
-      }
+      ${renderStatusBanner(state.authStatusMessage, state.authStatusTone)}
       <div class="auth-form">
         <label class="settings-field">
           <span>Email</span>
@@ -786,151 +926,332 @@ function renderManualInviteLogin() {
   `;
 }
 
-function renderDashboard(isBusy) {
+function renderDashboardView(isBusy) {
+  const interviews = getFilteredDashboardInterviews();
+  const statusOptions = [
+    { value: "all", label: "All statuses" },
+    { value: "draft", label: "Draft" },
+    { value: "ready_for_review", label: "Ready for review" },
+    { value: "final", label: "Final" },
+  ];
+  const sortOptions = [
+    { value: "updated_desc", label: "Recently updated" },
+    { value: "updated_asc", label: "Oldest updated" },
+    { value: "title_asc", label: "Title A-Z" },
+    { value: "title_desc", label: "Title Z-A" },
+  ];
+
   return `
-    <section class="dashboard-card">
-      <div class="dashboard-header">
-        <div>
-          <p class="section-kicker">Interview Dashboard</p>
-          <h2>Workspace</h2>
+    <section class="page-hero page-hero-compact">
+      <div class="hero-copy">
+        <p class="eyebrow">Workspace Manager</p>
+        <h1>Dashboard</h1>
+        <p class="hero-text">Search, filter, rename, open, copy, share, and manage saved stories without changing the current draft permissions or backend behavior.</p>
+      </div>
+      <div class="hero-actions">
+        <button type="button" class="primary-button" data-action="new-interview" ${isBusy ? "disabled" : ""}>+ New story</button>
+      </div>
+    </section>
+
+    ${renderStatusBanner(state.dashboardStatusMessage, state.dashboardStatusTone)}
+
+    <section class="dashboard-surface">
+      <div class="dashboard-toolbar">
+        <div class="dashboard-tabs" role="tablist" aria-label="Story scopes">
+          ${["mine", "shared", "all"]
+            .map(
+              (tabKey) => `
+                <button
+                  type="button"
+                  class="dashboard-tab ${state.dashboardActiveTab === tabKey ? "dashboard-tab-active" : ""}"
+                  data-action="set-dashboard-tab"
+                  data-dashboard-tab="${tabKey}"
+                  role="tab"
+                  aria-selected="${state.dashboardActiveTab === tabKey ? "true" : "false"}"
+                >
+                  ${escapeHtml(getDashboardTabLabel(tabKey))}
+                  <span>${getDashboardTabCount(tabKey)}</span>
+                </button>
+              `,
+            )
+            .join("")}
         </div>
-        <div class="dashboard-actions">
-          <button type="button" class="primary-button" data-action="new-interview" ${isBusy ? "disabled" : ""}>New Interview</button>
+        <div class="dashboard-filters">
+          <label class="dashboard-search">
+            <span class="sr-only">Search stories</span>
+            <input
+              type="search"
+              class="text-input"
+              data-dashboard-search="stories"
+              value="${escapeHtml(state.dashboardSearch)}"
+              placeholder="Search title or owner"
+            />
+          </label>
+          <label class="dashboard-status-filter">
+            <span class="sr-only">Status filter</span>
+            <select class="text-input settings-select" data-dashboard-status-filter="stories">
+              ${statusOptions
+                .map(
+                  (option) => `
+                    <option value="${option.value}" ${state.dashboardStatusFilter === option.value ? "selected" : ""}>
+                      ${escapeHtml(option.label)}
+                    </option>
+                  `,
+                )
+                .join("")}
+            </select>
+          </label>
+          <label class="dashboard-sort-filter">
+            <span class="sr-only">Sort stories</span>
+            <select class="text-input settings-select" data-dashboard-sort="stories">
+              ${sortOptions
+                .map(
+                  (option) => `
+                    <option value="${option.value}" ${state.myInterviewSort === option.value ? "selected" : ""}>
+                      ${escapeHtml(option.label)}
+                    </option>
+                  `,
+                )
+                .join("")}
+            </select>
+          </label>
         </div>
       </div>
-      <div class="dashboard-banner-slot">
-        ${
-          state.dashboardStatusMessage
-            ? `<div class="status-banner status-${escapeHtml(state.dashboardStatusTone)}">${escapeHtml(state.dashboardStatusMessage)}</div>`
-            : `<div class="dashboard-banner-spacer" aria-hidden="true"></div>`
-        }
-      </div>
-      <div class="dashboard-grid">
-        ${renderDashboardSection("My Interviews", getSortedMyInterviews(), {
-          emptyMessage: "No saved interviews yet. Start a new interview, then save it here.",
-          variant: "mine",
-          headerControls: renderMyInterviewSortControl(isBusy),
-          isBusy,
-        })}
-        ${renderDashboardSection("Shared Interviews", state.sharedInterviews, {
-          emptyMessage: "No shared interviews are available yet.",
-          variant: "shared",
-          isBusy,
-        })}
-      </div>
+
+      <section class="story-list-card">
+        <div class="story-list-header">
+          <span>Story</span>
+          <span>Owner</span>
+          <span>Updated</span>
+          <span>Visibility</span>
+          <span>Actions</span>
+        </div>
+        <div class="story-list">
+          ${
+            interviews.length
+              ? interviews.map((interview) => renderStoryListItem(interview, isBusy)).join("")
+              : `<p class="dashboard-empty">${escapeHtml(getDashboardEmptyMessage())}</p>`
+          }
+        </div>
+      </section>
     </section>
   `;
 }
 
-function renderDashboardSection(title, interviews, options) {
-  const items = interviews.length
-    ? interviews.map((interview) => renderInterviewListItem(interview, options)).join("")
-    : `<p class="dashboard-empty">${escapeHtml(options.emptyMessage)}</p>`;
-
-  return `
-    <section class="dashboard-section">
-      <div class="dashboard-section-header">
-        <div class="dashboard-section-title">
-          <h3>${escapeHtml(title)}</h3>
-          <span>${interviews.length}</span>
-        </div>
-        <div class="dashboard-section-controls">
-          ${options.headerControls || `<span class="dashboard-section-controls-placeholder" aria-hidden="true"></span>`}
-        </div>
-      </div>
-      <div class="dashboard-list">${items}</div>
-    </section>
-  `;
-}
-
-function renderMyInterviewSortControl(isBusy) {
-  return `
-    <label class="dashboard-sort-control">
-      <span>Sort by</span>
-      <select class="dashboard-sort-select" data-dashboard-sort="my-interviews" ${isBusy ? "disabled" : ""}>
-        <option value="updated_desc" ${state.myInterviewSort === "updated_desc" ? "selected" : ""}>Recently updated first</option>
-        <option value="updated_asc" ${state.myInterviewSort === "updated_asc" ? "selected" : ""}>Oldest updated first</option>
-        <option value="title_asc" ${state.myInterviewSort === "title_asc" ? "selected" : ""}>Title A-Z</option>
-        <option value="title_desc" ${state.myInterviewSort === "title_desc" ? "selected" : ""}>Title Z-A</option>
-      </select>
-    </label>
-  `;
-}
-
-function renderInterviewListItem(interview, options) {
-  const ownerEmail = normalizeAnswer(interview.ownerEmail);
+function renderStoryListItem(interview, isBusy) {
   const isOwner = Boolean(interview.isOwner);
-  const isSharedSection = options.variant === "shared";
+  const isRenaming = state.dashboardRenamingInterviewId === interview.id;
   const titleValue = getDraftTitleInputValue(interview);
-  const showCopyButton = isSharedSection && !isOwner;
+  const showCopyButton = !isOwner && interview.visibility === "shared";
+  const rowClassName = [
+    "story-row",
+    isRenaming ? "story-row-renaming" : "",
+    !isOwner ? "story-row-readonly" : "",
+  ]
+    .filter(Boolean)
+    .join(" ");
+
   return `
-    <article class="interview-row">
-      <div class="interview-row-primary">
-        <label class="sr-only" for="dashboard-title-${escapeHtml(interview.id)}">Interview title</label>
+    <article class="${rowClassName}" data-action="open-interview-row" data-interview-id="${escapeHtml(interview.id)}" tabindex="0">
+      <div class="story-cell story-cell-title">
         ${
-          !isSharedSection && isOwner
-            ? `<input
+          isRenaming
+            ? `
+              <label class="sr-only" for="dashboard-title-${escapeHtml(interview.id)}">Story title</label>
+              <input
                 id="dashboard-title-${escapeHtml(interview.id)}"
-                class="dashboard-title-input"
+                class="text-input story-title-input"
                 data-dashboard-field="title"
                 data-interview-id="${escapeHtml(interview.id)}"
                 type="text"
                 value="${escapeHtml(titleValue)}"
-                placeholder="Untitled interview"
-                ${options.isBusy ? "disabled" : ""}
-              />`
-            : `<h4>${escapeHtml(interview.projectName || "Untitled interview")}</h4>`
-        }
-        <div class="interview-row-actions">
-          <button type="button" class="secondary-button compact-button" data-action="open-interview" data-interview-id="${escapeHtml(interview.id)}" ${options.isBusy ? "disabled" : ""}>Open</button>
-        </div>
-      </div>
-      <div class="interview-row-secondary">
-        <span>${escapeHtml(ownerEmail || "Unknown owner")}</span>
-        <span>${escapeHtml(formatDateTime(interview.updatedAt))}</span>
-      </div>
-      <div class="interview-row-tertiary">
-        ${
-          isSharedSection
-            ? `
-              <span class="meta-pill meta-pill-neutral compact-pill">Shared</span>
-              ${
-                showCopyButton
-                  ? `<button type="button" class="secondary-button compact-button" data-action="copy-interview" data-interview-id="${escapeHtml(interview.id)}" ${options.isBusy ? "disabled" : ""}>Copy</button>`
-                  : ""
-              }
+                placeholder="Untitled story"
+                ${isBusy ? "disabled" : ""}
+              />
             `
-            : `
-              <label class="dashboard-visibility-field">
+            : `<h3 class="story-title-text">${escapeHtml(interview.projectName || "Untitled story")}</h3>`
+        }
+        <p class="story-cell-supporting-copy">
+          ${
+            isOwner
+              ? "Editable by you"
+              : "Shared with you. Copy to edit."
+          }
+        </p>
+      </div>
+      <div class="story-cell story-cell-owner">
+        <span class="story-owner-text">${escapeHtml(interview.ownerEmail || "Unknown owner")}</span>
+      </div>
+      <div class="story-cell story-cell-updated">
+        <span class="story-updated-text">${escapeHtml(formatDateTime(interview.updatedAt))}</span>
+      </div>
+      <div class="story-cell story-cell-pills">
+        ${
+          isOwner
+            ? `
+              <label class="story-visibility-field">
                 <span class="sr-only">Visibility</span>
                 <select
-                  class="dashboard-visibility-select"
+                  class="story-visibility-select"
                   data-dashboard-field="visibility"
                   data-interview-id="${escapeHtml(interview.id)}"
-                  ${options.isBusy ? "disabled" : ""}
+                  ${isBusy ? "disabled" : ""}
                 >
                   <option value="private" ${interview.visibility === "private" ? "selected" : ""}>Private</option>
                   <option value="shared" ${interview.visibility === "shared" ? "selected" : ""}>Shared</option>
                 </select>
               </label>
-              <button
-                type="button"
-                class="secondary-button compact-button destructive-button"
-                data-action="delete-interview"
-                data-interview-id="${escapeHtml(interview.id)}"
-                ${options.isBusy ? "disabled" : ""}
-              >Delete</button>
             `
+            : `<span class="meta-pill ${interview.visibility === "shared" ? "meta-pill-success" : "meta-pill-neutral"} compact-pill">${escapeHtml(formatVisibilityLabel(interview.visibility))}</span>`
+        }
+      </div>
+      <div class="story-cell story-cell-actions">
+        ${
+          isRenaming
+            ? `
+              <button type="button" class="secondary-button compact-button" data-action="save-rename" data-interview-id="${escapeHtml(interview.id)}" ${isBusy ? "disabled" : ""}>Save</button>
+              <button type="button" class="secondary-button compact-button" data-action="cancel-rename" data-interview-id="${escapeHtml(interview.id)}" ${isBusy ? "disabled" : ""}>Cancel</button>
+            `
+            : `
+              ${isOwner ? `<button type="button" class="secondary-button compact-button" data-action="start-rename" data-interview-id="${escapeHtml(interview.id)}" ${isBusy ? "disabled" : ""}>Rename</button>` : ""}
+            `
+        }
+        <button type="button" class="secondary-button compact-button" data-action="open-interview" data-interview-id="${escapeHtml(interview.id)}" ${isBusy ? "disabled" : ""}>Open</button>
+        ${
+          showCopyButton
+            ? `<button type="button" class="secondary-button compact-button" data-action="copy-interview" data-interview-id="${escapeHtml(interview.id)}" ${isBusy ? "disabled" : ""}>Copy</button>`
+            : ""
+        }
+        ${
+          isOwner
+            ? `<button type="button" class="secondary-button compact-button destructive-button" data-action="delete-interview" data-interview-id="${escapeHtml(interview.id)}" ${isBusy ? "disabled" : ""}>Delete</button>`
+            : ""
         }
       </div>
     </article>
   `;
 }
 
+function renderWorkspaceView(isBusy) {
+  const steps = getSteps();
+  const currentStep = getCurrentStep();
+  const isReviewStep = currentStep.stepKey === "review_and_generate";
+  const nextLabel = state.pendingAction === "analyzing" ? "Analyzing..." : "Next";
+  const generateLabel = state.pendingAction === "generating" ? "Generating..." : "Generate my impact story";
+  const testLabel = state.pendingAction === "testing_provider" ? "Testing..." : "Test connection";
+  const saveLabel = state.pendingAction === "saving_draft" ? "Saving..." : "Save Draft";
+  const isReadOnly = isFormReadOnly();
+  const showReturnToReview = state.reviewReturnStepIndex === steps.length - 1 && state.currentStepIndex < steps.length - 1;
+  const completedFieldCount = getCompletedFieldCount();
+
+  return `
+    <div class="workspace-shell">
+      <section class="page-hero page-hero-compact workspace-hero">
+        <div>
+          <p class="eyebrow">Workspace</p>
+          <h1>${escapeHtml(getWorkspaceTitle())}</h1>
+          <p class="hero-text">Move through the interview, keep AI setup in view before Details, and preserve dictation, cleanup, review, and generation inside the same workflow.</p>
+        </div>
+        <div class="hero-meta workspace-meta">
+          <span class="meta-pill meta-pill-neutral">${escapeHtml(formatVisibilityLabel(state.currentInterviewVisibility))}</span>
+          <span class="meta-pill meta-pill-neutral">${completedFieldCount}/${getAllFields().length} answered</span>
+        </div>
+      </section>
+
+      <div class="workspace-column">
+      ${renderSettingsPanel(testLabel, isBusy)}
+
+      <section class="progress-card">
+        <div class="progress-summary">
+          <div>
+            <p class="section-kicker">Progress</p>
+            <h2>Step ${state.currentStepIndex + 1} of ${steps.length}</h2>
+          </div>
+          <p class="progress-step-name">${escapeHtml(currentStep.title)}</p>
+        </div>
+        <div class="progress-bar" aria-hidden="true">
+          <span style="width: ${((state.currentStepIndex + 1) / steps.length) * 100}%"></span>
+        </div>
+        <ol class="progress-steps">
+          ${steps
+            .map((step, index) => {
+              const status =
+                index === state.currentStepIndex ? "current" : index < state.currentStepIndex ? "complete" : "upcoming";
+              return `
+                <li class="progress-step progress-step-${status}">
+                  <span class="progress-step-number">${index + 1}</span>
+                  <div>
+                    <p>${escapeHtml(step.title)}</p>
+                    <small>${escapeHtml(step.stepKey.replaceAll("_", " "))}</small>
+                  </div>
+                </li>
+              `;
+            })
+            .join("")}
+        </ol>
+      </section>
+
+      <section class="step-card workspace-step-card" ${isBusy ? 'aria-busy="true"' : ""}>
+        <div class="step-header">
+          <div>
+            <p class="section-kicker">${escapeHtml(currentStep.stepKey.replaceAll("_", " "))}</p>
+            <h2>${escapeHtml(currentStep.title)}</h2>
+          </div>
+          <span class="step-badge">Step ${currentStep.stepNumber}</span>
+        </div>
+        <p class="step-purpose">${escapeHtml(currentStep.purpose)}</p>
+
+        ${
+          isReadOnly && state.activeInterviewId
+            ? `
+              <div class="status-banner status-warning workspace-readonly-banner">
+                ${escapeHtml(SHARED_READ_ONLY_NOTICE)}
+                <button type="button" class="secondary-button inline-banner-button" data-action="copy-interview" data-interview-id="${escapeHtml(state.activeInterviewId)}" ${isBusy ? "disabled" : ""}>Copy to My stories</button>
+              </div>
+            `
+            : ""
+        }
+
+        ${renderStatusBanner(state.statusMessage, state.statusTone)}
+
+        ${isReviewStep ? renderReviewStep() : renderQuestionStep(currentStep)}
+
+        ${
+          showReturnToReview
+            ? `<div class="return-review-row">
+                <button type="button" class="secondary-button compact-button" data-action="return-to-review" ${isBusy ? "disabled" : ""}>Return to Review</button>
+              </div>`
+            : ""
+        }
+
+        <div class="step-actions step-actions-inline">
+          <button
+            type="button"
+            class="secondary-button"
+            data-action="back"
+            ${state.currentStepIndex === 0 || isBusy ? "disabled" : ""}
+          >
+            Back
+          </button>
+          <button type="button" class="secondary-button" data-action="save-draft" ${isBusy || isReadOnly ? "disabled" : ""}>
+            ${escapeHtml(saveLabel)}
+          </button>
+          ${
+            isReviewStep
+              ? `<button type="button" class="primary-button" data-action="generate" ${isBusy || isReadOnly ? "disabled" : ""}>${escapeHtml(generateLabel)}</button>`
+              : `<button type="button" class="primary-button" data-action="next" ${isBusy ? "disabled" : ""}>${escapeHtml(nextLabel)}</button>`
+          }
+        </div>
+      </section>
+      </div>
+    </div>
+  `;
+}
+
 function renderSettingsPanel(testLabel, isBusy) {
   const settings = state.providerSettings;
   const showFields = settings.provider !== "mock";
-  const openLabel = state.settingsExpanded ? "Hide AI Settings" : "Show AI Settings";
+  const openLabel = state.settingsExpanded ? "Hide setup" : "Show setup";
   const panelBody = state.settingsExpanded
     ? `
       <div class="settings-body">
@@ -1006,25 +1327,26 @@ function renderSettingsPanel(testLabel, isBusy) {
           <button type="button" class="secondary-button" data-action="test-provider" ${isBusy ? "disabled" : ""}>${escapeHtml(testLabel)}</button>
         </div>
 
-        ${
-          state.providerStatusMessage
-            ? `<div class="status-banner status-${escapeHtml(state.providerStatusTone)}">${escapeHtml(state.providerStatusMessage)}</div>`
-            : ""
-        }
+        ${renderStatusBanner(state.providerStatusMessage, state.providerStatusTone)}
       </div>
     `
     : "";
 
   return `
-    <section class="settings-card">
+    <section class="settings-card workspace-settings-card">
       <div class="settings-header">
         <div>
           <p class="section-kicker">AI Settings</p>
-          <h2>Local demo provider configuration</h2>
+          <h2>Setup before Details</h2>
         </div>
         <button type="button" class="secondary-button settings-toggle" data-action="toggle-settings">${escapeHtml(openLabel)}</button>
       </div>
-      <p class="step-purpose">Choose the provider for Step 1 analysis and Step 5 generation. The frontend sends the settings to the local backend for each request, but does not persist them.</p>
+      <p class="step-purpose">Choose the provider for project analysis, note cleanup, and story generation. Mock, Claude, and OpenAI-compatible options remain available exactly as before.</p>
+      <div class="settings-summary-row">
+        <span class="meta-pill ${escapeHtml(getCurrentModeClass())}">${escapeHtml(getCurrentModeLabel())}</span>
+        <span class="meta-pill meta-pill-neutral">${escapeHtml(getEffectiveModelLabel())}</span>
+        <span class="meta-pill meta-pill-neutral">Server-side AI</span>
+      </div>
       ${panelBody}
     </section>
   `;
@@ -1074,9 +1396,12 @@ function renderField(field) {
     : "";
 
   return `
-    <article class="field-card">
+    <article class="field-card question-card">
       <div class="field-topline">
-        <label class="field-label" for="${escapeHtml(field.fieldKey)}">${escapeHtml(field.label)}</label>
+        <div class="field-heading">
+          <span class="field-kicker">Question</span>
+          <label class="field-label" for="${escapeHtml(field.fieldKey)}">${escapeHtml(field.label)}</label>
+        </div>
         <div class="field-pills">
           <span class="field-pill">${escapeHtml(INPUT_TYPE_LABELS[field.inputType] ?? field.inputType)}</span>
           <span class="field-pill field-pill-soft">${escapeHtml(
@@ -1110,6 +1435,7 @@ function renderFieldAssistantControls(field) {
 
   return `
     <div class="field-assistant-row">
+      <span class="field-assistant-label">Notes tools</span>
       <div class="field-assistant-actions">
         ${
           supportsVoiceInput()
@@ -1275,6 +1601,16 @@ function renderReviewStep() {
     : "";
 
   return `
+    <section class="review-overview-card">
+      <div>
+        <p class="section-kicker">Review summary</p>
+        <h3>Check the full story input before generation</h3>
+      </div>
+      <div class="review-overview-pills">
+        <span class="meta-pill meta-pill-neutral">${getCompletedFieldCount()}/${getAllFields().length} answered</span>
+        <span class="meta-pill meta-pill-neutral">${escapeHtml(formatVisibilityLabel(state.currentInterviewVisibility))}</span>
+      </div>
+    </section>
     <div class="review-intro">
       <p>Review every response before generating the draft. Empty fields are shown as <strong>Not provided.</strong></p>
     </div>
@@ -1387,7 +1723,7 @@ function renderConciseSection(buttonLabel) {
     <section class="story-output concise-output">
       <div class="story-output-header">
         <div>
-          <p class="section-kicker">Optional LinkedIn-style version</p>
+          <p class="section-kicker">Optional public-facing version</p>
           <h3>Shorter public-facing draft</h3>
         </div>
       </div>
@@ -1398,6 +1734,13 @@ function renderConciseSection(buttonLabel) {
       ${conciseMarkup}
     </section>
   `;
+}
+
+function renderStatusBanner(message, tone = "info") {
+  if (!message) {
+    return "";
+  }
+  return `<div class="status-banner status-${escapeHtml(tone)}">${escapeHtml(message)}</div>`;
 }
 
 function formatReviewValue(field, rawValue) {
@@ -1428,6 +1771,10 @@ function formatReviewValue(field, rawValue) {
 }
 
 function attachListeners() {
+  document.querySelectorAll('[data-action="navigate-view"]').forEach((button) => {
+    button.addEventListener("click", handleNavigateView);
+  });
+
   document.querySelectorAll("[data-auth-field]").forEach((element) => {
     element.addEventListener("input", handleAuthFieldInput);
     element.addEventListener("keydown", handleAuthFieldKeydown);
@@ -1454,15 +1801,26 @@ function attachListeners() {
   document.querySelectorAll('[data-dashboard-field="title"]').forEach((element) => {
     element.addEventListener("input", handleDashboardTitleInput);
     element.addEventListener("keydown", handleDashboardTitleKeydown);
-    element.addEventListener("blur", handleDashboardTitleCommit);
   });
 
   document.querySelectorAll('[data-dashboard-field="visibility"]').forEach((element) => {
     element.addEventListener("change", handleDashboardVisibilityChange);
   });
 
-  document.querySelectorAll('[data-dashboard-sort="my-interviews"]').forEach((element) => {
-    element.addEventListener("change", handleMyInterviewSortChange);
+  document.querySelectorAll('[data-dashboard-tab]').forEach((element) => {
+    element.addEventListener("click", handleDashboardTabChange);
+  });
+
+  document.querySelectorAll('[data-dashboard-search="stories"]').forEach((element) => {
+    element.addEventListener("input", handleDashboardSearchInput);
+  });
+
+  document.querySelectorAll('[data-dashboard-status-filter="stories"]').forEach((element) => {
+    element.addEventListener("change", handleDashboardStatusFilterChange);
+  });
+
+  document.querySelectorAll('[data-dashboard-sort="stories"]').forEach((element) => {
+    element.addEventListener("change", handleDashboardSortChange);
   });
 
   document.querySelectorAll('[data-action="select-option"]').forEach((button) => {
@@ -1512,6 +1870,23 @@ function attachListeners() {
 
   document.querySelectorAll('[data-action="open-interview"]').forEach((button) => {
     button.addEventListener("click", handleOpenInterview);
+  });
+
+  document.querySelectorAll('[data-action="open-interview-row"]').forEach((row) => {
+    row.addEventListener("click", handleOpenInterviewRow);
+    row.addEventListener("keydown", handleOpenInterviewRowKeydown);
+  });
+
+  document.querySelectorAll('[data-action="start-rename"]').forEach((button) => {
+    button.addEventListener("click", handleStartRename);
+  });
+
+  document.querySelectorAll('[data-action="cancel-rename"]').forEach((button) => {
+    button.addEventListener("click", handleCancelRename);
+  });
+
+  document.querySelectorAll('[data-action="save-rename"]').forEach((button) => {
+    button.addEventListener("click", handleDashboardTitleCommit);
   });
 
   document.querySelectorAll('[data-action="copy-interview"]').forEach((button) => {
@@ -1621,8 +1996,17 @@ function handleProviderFieldInput(event) {
   state.providerStatusTone = "info";
 }
 
+function handleNavigateView(event) {
+  const nextView = event.currentTarget.dataset.view;
+  if (!nextView) {
+    return;
+  }
+  state.currentView = nextView;
+  render();
+}
+
 function findDashboardInterview(interviewId) {
-  return [...state.myInterviews, ...state.sharedInterviews].find((item) => item.id === interviewId) || null;
+  return [...state.allInterviews, ...state.myInterviews, ...state.sharedInterviews].find((item) => item.id === interviewId) || null;
 }
 
 async function saveInterviewMetadata(interviewId, changes, successMessage) {
@@ -1675,15 +2059,21 @@ function handleDashboardTitleInput(event) {
 }
 
 function handleDashboardTitleKeydown(event) {
+  if (event.key === "Escape") {
+    event.preventDefault();
+    handleCancelRename(event);
+    return;
+  }
+
   if (event.key !== "Enter") {
     return;
   }
   event.preventDefault();
-  event.currentTarget.blur();
+  handleDashboardTitleCommit(event);
 }
 
 async function handleDashboardTitleCommit(event) {
-  const interviewId = event.target.dataset.interviewId;
+  const interviewId = event.currentTarget.dataset.interviewId || event.target.dataset.interviewId;
   if (!interviewId) {
     return;
   }
@@ -1695,14 +2085,17 @@ async function handleDashboardTitleCommit(event) {
 
   const nextTitle = normalizeAnswer(state.dashboardEditingTitles[interviewId] ?? interview.projectName);
   const currentTitle = normalizeAnswer(interview.projectName);
-  delete state.dashboardEditingTitles[interviewId];
 
   if (!nextTitle || nextTitle === currentTitle) {
+    delete state.dashboardEditingTitles[interviewId];
+    state.dashboardRenamingInterviewId = "";
     render();
     return;
   }
 
+  state.dashboardRenamingInterviewId = "";
   await saveInterviewMetadata(interviewId, { projectName: nextTitle }, "Title updated.");
+  delete state.dashboardEditingTitles[interviewId];
 }
 
 async function handleDashboardVisibilityChange(event) {
@@ -1724,8 +2117,80 @@ async function handleDashboardVisibilityChange(event) {
   await saveInterviewMetadata(interviewId, { visibility: nextVisibility }, "Visibility updated.");
 }
 
-function handleMyInterviewSortChange(event) {
+function handleDashboardTabChange(event) {
+  const nextTab = event.currentTarget.dataset.dashboardTab;
+  if (!nextTab) {
+    return;
+  }
+  state.dashboardActiveTab = nextTab;
+  state.dashboardRenamingInterviewId = "";
+  render();
+}
+
+function handleDashboardSearchInput(event) {
+  state.dashboardSearch = event.target.value || "";
+  state.dashboardRenamingInterviewId = "";
+  render();
+}
+
+function handleDashboardStatusFilterChange(event) {
+  state.dashboardStatusFilter = event.target.value || "all";
+  state.dashboardRenamingInterviewId = "";
+  render();
+}
+
+function handleDashboardSortChange(event) {
   state.myInterviewSort = event.target.value || "updated_desc";
+  state.dashboardRenamingInterviewId = "";
+  render();
+}
+
+function handleOpenInterviewRow(event) {
+  if (state.dashboardRenamingInterviewId === event.currentTarget.dataset.interviewId) {
+    return;
+  }
+  if (event.target.closest("button, input, select, textarea, a, label")) {
+    return;
+  }
+  handleOpenInterview(event);
+}
+
+function handleOpenInterviewRowKeydown(event) {
+  if (event.key !== "Enter" && event.key !== " ") {
+    return;
+  }
+  event.preventDefault();
+  handleOpenInterviewRow(event);
+}
+
+function handleStartRename(event) {
+  const interviewId = event.currentTarget.dataset.interviewId;
+  if (!interviewId) {
+    return;
+  }
+  const interview = findDashboardInterview(interviewId);
+  if (!interview || !interview.isOwner) {
+    return;
+  }
+  state.dashboardRenamingInterviewId = interviewId;
+  state.dashboardEditingTitles[interviewId] = interview.projectName || "";
+  render();
+  requestAnimationFrame(() => {
+    const input = document.getElementById(`dashboard-title-${interviewId}`);
+    if (input) {
+      input.focus();
+      input.select();
+    }
+  });
+}
+
+function handleCancelRename(event) {
+  const interviewId = event.currentTarget.dataset.interviewId || event.target.dataset.interviewId;
+  if (!interviewId) {
+    return;
+  }
+  delete state.dashboardEditingTitles[interviewId];
+  state.dashboardRenamingInterviewId = "";
   render();
 }
 
@@ -1768,6 +2233,7 @@ async function handleLogin() {
     const pendingInterviewId = state.pendingInterviewId;
     resetInterviewWorkspace();
     state.pendingInterviewId = pendingInterviewId;
+    state.currentView = pendingInterviewId ? "workspace" : "home";
     await refreshInterviewDashboard();
     if (pendingInterviewId) {
       try {
@@ -1802,7 +2268,9 @@ async function handleLogout() {
     state.currentUser = null;
     state.myInterviews = [];
     state.sharedInterviews = [];
+    state.allInterviews = [];
     state.dashboardEditingTitles = {};
+    state.dashboardRenamingInterviewId = "";
     state.authForm = {
       email: "",
       password: "",
@@ -1813,6 +2281,7 @@ async function handleLogout() {
     state.providerStatusMessage = "";
     state.statusMessage = "";
     state.pendingAction = "";
+    state.currentView = "home";
     resetInterviewWorkspace();
     render();
   }
@@ -1820,6 +2289,7 @@ async function handleLogout() {
 
 function handleNewInterview() {
   resetInterviewWorkspace();
+  state.currentView = "workspace";
   state.dashboardStatusMessage = "Started a new interview draft.";
   state.dashboardStatusTone = "success";
   state.statusMessage = "";
@@ -1839,12 +2309,13 @@ async function handleOpenInterview(event) {
 
   try {
     await loadInterviewDraft(interviewId);
-    state.dashboardStatusMessage = "Interview opened.";
+    state.currentView = "workspace";
+    state.dashboardStatusMessage = state.currentInterviewCanEdit ? "Story opened." : "Shared story opened.";
     state.dashboardStatusTone = "success";
     state.statusMessage = state.currentInterviewCanEdit
       ? "Interview loaded. Continue editing below."
-      : "Shared interview opened in read-only mode. Copy it to My Drafts before editing.";
-    state.statusTone = state.currentInterviewCanEdit ? "success" : "warning";
+      : "";
+    state.statusTone = "success";
   } catch (error) {
     state.dashboardStatusMessage = getErrorMessage(error);
     state.dashboardStatusTone = "warning";
@@ -1861,18 +2332,22 @@ async function handleCopyInterview(event) {
   }
 
   state.pendingAction = "copying_interview";
-  state.dashboardStatusMessage = "Copying interview into your drafts...";
+  state.dashboardStatusMessage = "Copying story into My stories...";
   state.dashboardStatusTone = "info";
   render();
 
   try {
     const interview = await postJson(`/api/interviews/${encodeURIComponent(interviewId)}/copy`, {});
     applyInterviewDraft(interview);
+    state.currentView = "dashboard";
+    state.dashboardActiveTab = "mine";
+    state.dashboardSearch = "";
+    state.dashboardStatusFilter = "all";
+    state.statusMessage = "";
+    state.statusTone = "info";
     await refreshInterviewDashboard();
-    state.dashboardStatusMessage = "Shared interview copied to My Drafts.";
+    state.dashboardStatusMessage = "Copied to My stories.";
     state.dashboardStatusTone = "success";
-    state.statusMessage = "You are now editing your own copied draft.";
-    state.statusTone = "success";
   } catch (error) {
     state.dashboardStatusMessage = getErrorMessage(error);
     state.dashboardStatusTone = "warning";
@@ -1946,8 +2421,8 @@ async function handleSeedSharedInterview() {
 
 async function handleSaveDraft() {
   if (isFormReadOnly()) {
-    state.statusMessage = "This shared interview is read-only. Copy it to My Drafts before saving changes.";
-    state.statusTone = "warning";
+    state.statusMessage = "";
+    state.statusTone = "";
     render();
     return;
   }
@@ -2388,8 +2863,8 @@ function handleBack() {
 
 async function handleGenerateStory() {
   if (isFormReadOnly()) {
-    state.statusMessage = "This shared interview is read-only. Copy it to My Drafts before generating a new draft.";
-    state.statusTone = "warning";
+    state.statusMessage = "";
+    state.statusTone = "";
     render();
     return;
   }
@@ -2442,8 +2917,8 @@ async function handleGenerateStory() {
 
 async function handleGenerateConciseVersion() {
   if (isFormReadOnly()) {
-    state.statusMessage = "This shared interview is read-only. Copy it to My Drafts before creating a concise version.";
-    state.statusTone = "warning";
+    state.statusMessage = "";
+    state.statusTone = "";
     render();
     return;
   }
