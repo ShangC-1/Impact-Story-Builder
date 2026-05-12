@@ -46,6 +46,9 @@ const state = {
   authStatusMessage: "",
   authStatusTone: "info",
   settingsExpanded: true,
+  voiceInputSupported: false,
+  activeDictationFieldKey: "",
+  cleaningFieldKey: "",
 };
 
 const REQUIRED_STATUS_LABELS = {
@@ -91,6 +94,11 @@ const STORY_LENGTH_LIMITS = {
   defaultMin: 300,
   defaultMax: 350,
 };
+const VOICE_INPUT_PRIVACY_NOTE =
+  "Voice input creates a draft transcript. Please review and edit before saving or generating.";
+const VOICE_INPUT_UNSUPPORTED_MESSAGE =
+  "Voice input is not supported in this browser. Please use Chrome or Edge, or type manually.";
+let activeSpeechRecognition = null;
 
 bootstrap();
 
@@ -147,10 +155,14 @@ function initializeState(schema, backendHealth, currentUser) {
   };
   state.authStatusMessage = "";
   state.authStatusTone = "info";
+  state.voiceInputSupported = Boolean(getSpeechRecognitionConstructor());
+  state.activeDictationFieldKey = "";
+  state.cleaningFieldKey = "";
   resetInterviewWorkspace();
 }
 
 function resetInterviewWorkspace() {
+  stopActiveDictation({ preserveStatus: true, renderAfter: false });
   state.activeInterviewId = "";
   state.currentInterviewProjectName = "";
   state.currentInterviewVisibility = "private";
@@ -166,6 +178,7 @@ function resetInterviewWorkspace() {
   state.reviewNotes = [];
   state.validationErrors = {};
   state.reviewReturnStepIndex = null;
+  state.cleaningFieldKey = "";
   setInterviewIdInUrl("");
 
   for (const field of getAllFields()) {
@@ -222,6 +235,25 @@ function getAllFields(schema = state.schema) {
 
 function getFieldByKey(fieldKey) {
   return getAllFields().find((field) => field.fieldKey === fieldKey) ?? null;
+}
+
+function getSpeechRecognitionConstructor() {
+  if (typeof window === "undefined") {
+    return null;
+  }
+  return window.SpeechRecognition || window.webkitSpeechRecognition || null;
+}
+
+function supportsVoiceInput() {
+  return Boolean(state.voiceInputSupported && getSpeechRecognitionConstructor());
+}
+
+function isVoiceCapableField(field) {
+  return field?.inputType === "textarea";
+}
+
+function getVoiceCapableFields(step = getCurrentStep()) {
+  return (step?.fields ?? []).filter((field) => isVoiceCapableField(field));
 }
 
 function getOutcomeOptionLabel(optionKey) {
@@ -350,6 +382,7 @@ function buildInterviewDraftPayload() {
 }
 
 function applyInterviewDraft(interview) {
+  stopActiveDictation({ preserveStatus: true, renderAfter: false });
   const answers = normalizeLoadedAnswers(interview.answers ?? {});
 
   state.activeInterviewId = interview.id || "";
@@ -365,6 +398,7 @@ function applyInterviewDraft(interview) {
   state.conciseVersion = interview.conciseVersion ?? "";
   state.reviewNotes = interview.reviewNotes ?? [];
   state.validationErrors = {};
+  state.cleaningFieldKey = "";
   state.reviewReturnStepIndex =
     interview.reviewReturnStepIndex == null ? null : normalizeSavedStepIndex(interview.reviewReturnStepIndex, answers);
   state.currentStepIndex = normalizeSavedStepIndex(interview.currentStepIndex, answers);
@@ -683,6 +717,10 @@ function render() {
   `;
 
   attachListeners();
+
+  if (state.activeDictationFieldKey && !document.getElementById(state.activeDictationFieldKey)) {
+    stopActiveDictation({ preserveStatus: true });
+  }
 }
 
 function renderManualInviteLogin() {
@@ -1008,7 +1046,16 @@ function getModelPlaceholder() {
 
 function renderQuestionStep(step) {
   const fields = step.fields ?? [];
+  const voiceCapableFields = getVoiceCapableFields(step);
+  const voiceNoteMarkup = voiceCapableFields.length
+    ? `
+      <div class="voice-note-banner ${supportsVoiceInput() ? "" : "voice-note-banner-warning"}">
+        ${escapeHtml(supportsVoiceInput() ? VOICE_INPUT_PRIVACY_NOTE : VOICE_INPUT_UNSUPPORTED_MESSAGE)}
+      </div>
+    `
+    : "";
   return `
+    ${voiceNoteMarkup}
     <div class="field-list">
       ${fields.map((field) => renderField(field)).join("")}
     </div>
@@ -1043,9 +1090,58 @@ function renderField(field) {
         <p>${escapeHtml(field.example)}</p>
       </div>
       ${renderInputControl(field)}
+      ${renderFieldAssistantControls(field)}
       ${inferenceMarkup}
       ${error ? `<p class="field-error">${escapeHtml(error)}</p>` : ""}
     </article>
+  `;
+}
+
+function renderFieldAssistantControls(field) {
+  if (!isVoiceCapableField(field)) {
+    return "";
+  }
+
+  const isReadOnly = isFormReadOnly();
+  const isListening = state.activeDictationFieldKey === field.fieldKey;
+  const isCleaning = state.cleaningFieldKey === field.fieldKey;
+  const hasActiveOtherField =
+    Boolean(state.activeDictationFieldKey) && state.activeDictationFieldKey !== field.fieldKey;
+
+  return `
+    <div class="field-assistant-row">
+      <div class="field-assistant-actions">
+        ${
+          supportsVoiceInput()
+            ? `
+              <button
+                type="button"
+                class="secondary-button compact-button"
+                data-action="toggle-dictation"
+                data-field-key="${escapeHtml(field.fieldKey)}"
+                ${isReadOnly || isCleaning || hasActiveOtherField ? "disabled" : ""}
+              >
+                ${escapeHtml(isListening ? "Stop" : "Dictate")}
+              </button>
+            `
+            : ""
+        }
+        <button
+          type="button"
+          class="secondary-button compact-button"
+          data-action="clean-field-notes"
+          data-field-key="${escapeHtml(field.fieldKey)}"
+          ${isReadOnly || isCleaning || isListening || Boolean(state.pendingAction) ? "disabled" : ""}
+        >
+          ${escapeHtml(isCleaning ? "Cleaning..." : "Clean up notes")}
+        </button>
+      </div>
+      ${
+        isListening
+          ? `<span class="field-assistant-state">Listening for this field...</span>`
+          : ""
+      }
+    </div>
   `;
 }
 
@@ -1380,6 +1476,14 @@ function attachListeners() {
   document.querySelectorAll("[data-style-field]").forEach((element) => {
     element.addEventListener("input", handleStoryStyleInput);
     element.addEventListener("change", handleStoryStyleInput);
+  });
+
+  document.querySelectorAll('[data-action="toggle-dictation"]').forEach((button) => {
+    button.addEventListener("click", handleToggleDictation);
+  });
+
+  document.querySelectorAll('[data-action="clean-field-notes"]').forEach((button) => {
+    button.addEventListener("click", handleCleanFieldNotes);
   });
 
   document.querySelectorAll('[data-action="next"]').forEach((button) => {
@@ -1903,6 +2007,204 @@ function handleFieldInput(event) {
   delete state.validationErrors[fieldKey];
   delete state.aiInferences[fieldKey];
   state.statusMessage = "";
+}
+
+function handleToggleDictation(event) {
+  const fieldKey = event.currentTarget.dataset.fieldKey;
+  if (!fieldKey || isFormReadOnly()) {
+    return;
+  }
+
+  if (state.activeDictationFieldKey === fieldKey) {
+    stopActiveDictation();
+    return;
+  }
+
+  if (!supportsVoiceInput()) {
+    state.statusMessage = VOICE_INPUT_UNSUPPORTED_MESSAGE;
+    state.statusTone = "warning";
+    render();
+    return;
+  }
+
+  if (state.activeDictationFieldKey) {
+    return;
+  }
+
+  startDictation(fieldKey);
+}
+
+function startDictation(fieldKey) {
+  const RecognitionConstructor = getSpeechRecognitionConstructor();
+  if (!RecognitionConstructor) {
+    state.statusMessage = VOICE_INPUT_UNSUPPORTED_MESSAGE;
+    state.statusTone = "warning";
+    render();
+    return;
+  }
+
+  const recognition = new RecognitionConstructor();
+  recognition.lang = "en-US";
+  recognition.continuous = true;
+  recognition.interimResults = false;
+  recognition.maxAlternatives = 1;
+
+  recognition.onresult = (resultEvent) => {
+    const transcriptParts = [];
+    for (let index = resultEvent.resultIndex; index < resultEvent.results.length; index += 1) {
+      const result = resultEvent.results[index];
+      if (result.isFinal && result[0]?.transcript) {
+        transcriptParts.push(result[0].transcript.trim());
+      }
+    }
+
+    const transcript = transcriptParts.join(" ").trim();
+    if (!transcript) {
+      return;
+    }
+
+    appendTranscriptToField(fieldKey, transcript);
+    state.statusMessage = "Voice transcript appended. Review and edit before saving or generating.";
+    state.statusTone = "info";
+    render();
+  };
+
+  recognition.onerror = (recognitionError) => {
+    stopActiveDictation({ preserveStatus: true });
+    state.statusMessage = formatSpeechRecognitionError(recognitionError?.error);
+    state.statusTone = "warning";
+    render();
+  };
+
+  recognition.onend = () => {
+    if (activeSpeechRecognition !== recognition) {
+      return;
+    }
+    activeSpeechRecognition = null;
+    state.activeDictationFieldKey = "";
+    render();
+  };
+
+  try {
+    activeSpeechRecognition = recognition;
+    state.activeDictationFieldKey = fieldKey;
+    state.statusMessage = "";
+    render();
+    recognition.start();
+  } catch (error) {
+    activeSpeechRecognition = null;
+    state.activeDictationFieldKey = "";
+    state.statusMessage = `Voice input could not start: ${getErrorMessage(error)}`;
+    state.statusTone = "warning";
+    render();
+  }
+}
+
+function stopActiveDictation({ preserveStatus = false, renderAfter = true } = {}) {
+  const recognition = activeSpeechRecognition;
+  activeSpeechRecognition = null;
+  state.activeDictationFieldKey = "";
+
+  if (!preserveStatus) {
+    state.statusMessage = "";
+  }
+
+  if (recognition) {
+    recognition.onresult = null;
+    recognition.onerror = null;
+    recognition.onend = null;
+    try {
+      recognition.stop();
+    } catch (_error) {
+      // Ignore stop errors from browsers that already ended recognition.
+    }
+  }
+
+  if (renderAfter) {
+    render();
+  }
+}
+
+function appendTranscriptToField(fieldKey, transcript) {
+  const currentValue = String(state.answers[fieldKey] ?? "");
+  const nextValue = joinFieldTextAndTranscript(currentValue, transcript);
+  state.answers[fieldKey] = nextValue;
+  delete state.validationErrors[fieldKey];
+  delete state.aiInferences[fieldKey];
+}
+
+function joinFieldTextAndTranscript(existingText, transcript) {
+  const existing = String(existingText ?? "").trim();
+  const nextTranscript = String(transcript ?? "").trim();
+  if (!existing) {
+    return nextTranscript;
+  }
+  if (!nextTranscript) {
+    return existing;
+  }
+
+  const separator = existing.includes("\n") || existing.length > 140 ? "\n" : " ";
+  return `${existing}${separator}${nextTranscript}`.trim();
+}
+
+function formatSpeechRecognitionError(errorCode) {
+  const normalizedCode = String(errorCode || "").trim().toLowerCase();
+  if (normalizedCode === "not-allowed" || normalizedCode === "service-not-allowed") {
+    return "Microphone permission was blocked. Allow microphone access and try again.";
+  }
+  if (normalizedCode === "no-speech") {
+    return "No speech was detected. Try again and speak more clearly.";
+  }
+  if (normalizedCode === "audio-capture") {
+    return "No microphone was found for voice input. Check your device settings and try again.";
+  }
+  if (normalizedCode === "network") {
+    return "Voice input failed in the browser. Check your connection and try again.";
+  }
+  if (normalizedCode === "aborted") {
+    return "Voice input stopped.";
+  }
+  return "Voice input could not capture a transcript. Please type manually or try again.";
+}
+
+async function handleCleanFieldNotes(event) {
+  const fieldKey = event.currentTarget.dataset.fieldKey;
+  if (!fieldKey || isFormReadOnly()) {
+    return;
+  }
+
+  const sourceText = String(state.answers[fieldKey] ?? "").trim();
+  if (!sourceText) {
+    state.statusMessage = "Add some notes to this field before using Clean up notes.";
+    state.statusTone = "warning";
+    render();
+    return;
+  }
+
+  state.cleaningFieldKey = fieldKey;
+  state.statusMessage = "";
+  render();
+
+  try {
+    const result = await postJson("/api/clean-field-notes", {
+      text: sourceText,
+      fieldKey,
+      providerSettings: getProviderPayload(),
+    });
+    state.answers[fieldKey] = result.cleanedText ?? sourceText;
+    delete state.validationErrors[fieldKey];
+    delete state.aiInferences[fieldKey];
+    state.statusMessage = result.notes?.length
+      ? result.notes.join(" ")
+      : "Field notes cleaned. Review the text before saving or generating.";
+    state.statusTone = "success";
+  } catch (error) {
+    state.statusMessage = getErrorMessage(error);
+    state.statusTone = "warning";
+  } finally {
+    state.cleaningFieldKey = "";
+    render();
+  }
 }
 
 function handleOptionSelect(event) {

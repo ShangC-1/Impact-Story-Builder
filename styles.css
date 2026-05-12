@@ -853,6 +853,41 @@ body {
   line-height: 1.5;
 }
 
+.voice-note-banner {
+  margin-bottom: 1rem;
+  padding: 0.85rem 0.95rem;
+  border-radius: var(--radius-md);
+  background: rgba(14, 107, 115, 0.08);
+  color: var(--muted);
+  line-height: 1.5;
+}
+
+.voice-note-banner-warning {
+  background: rgba(177, 86, 54, 0.1);
+  color: #8d2f20;
+}
+
+.field-assistant-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.85rem;
+  align-items: center;
+  margin-top: 0.7rem;
+  flex-wrap: wrap;
+}
+
+.field-assistant-actions {
+  display: flex;
+  gap: 0.55rem;
+  flex-wrap: wrap;
+}
+
+.field-assistant-state {
+  color: var(--accent);
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
 .step-actions,
 .story-output-header,
 .review-section-header {
@@ -1142,6 +1177,7 @@ body {
   .settings-header,
   .session-card,
   .hero-card,
+  .field-assistant-row,
   .progress-summary,
   .field-topline,
   .step-header,

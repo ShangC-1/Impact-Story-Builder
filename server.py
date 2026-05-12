@@ -1122,6 +1122,16 @@ class BaseProvider:
     ) -> dict[str, Any]:
         raise NotImplementedError
 
+    def clean_field_notes(
+        self,
+        *,
+        service: "ImpactStoryService",
+        settings: ProviderSettings,
+        text: str,
+        field_key: str,
+    ) -> dict[str, Any]:
+        raise NotImplementedError
+
     def test_connection(self, *, service: "ImpactStoryService", settings: ProviderSettings) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -1166,6 +1176,16 @@ class MockProvider(BaseProvider):
         answers: dict[str, Any],
     ) -> dict[str, Any]:
         return service._mock_generate_concise_version(generated_story, answers)
+
+    def clean_field_notes(
+        self,
+        *,
+        service: "ImpactStoryService",
+        settings: ProviderSettings,
+        text: str,
+        field_key: str,
+    ) -> dict[str, Any]:
+        return service._mock_clean_field_notes(text, field_key)
 
     def test_connection(self, *, service: "ImpactStoryService", settings: ProviderSettings) -> dict[str, Any]:
         return {
@@ -1230,6 +1250,23 @@ class ClaudeProvider(BaseProvider):
             max_tokens=500,
         )
         return service.transform_concise_result(result, mode=self.provider_key, provider_label=self.provider_label)
+
+    def clean_field_notes(
+        self,
+        *,
+        service: "ImpactStoryService",
+        settings: ProviderSettings,
+        text: str,
+        field_key: str,
+    ) -> dict[str, Any]:
+        result = self._structured_json_call(
+            service=service,
+            settings=settings,
+            system_prompt=service.cleanup_developer_prompt(field_key),
+            user_prompt=service.cleanup_user_prompt(text, field_key),
+            max_tokens=700,
+        )
+        return service.transform_cleanup_result(result, mode=self.provider_key, provider_label=self.provider_label)
 
     def test_connection(self, *, service: "ImpactStoryService", settings: ProviderSettings) -> dict[str, Any]:
         self._require_api_key(settings)
@@ -1393,6 +1430,23 @@ class OpenAICompatibleProvider(BaseProvider):
             max_tokens=500,
         )
         return service.transform_concise_result(result, mode=self.provider_key, provider_label=self.provider_label)
+
+    def clean_field_notes(
+        self,
+        *,
+        service: "ImpactStoryService",
+        settings: ProviderSettings,
+        text: str,
+        field_key: str,
+    ) -> dict[str, Any]:
+        result = self._structured_json_call(
+            service=service,
+            settings=settings,
+            system_prompt=service.cleanup_developer_prompt(field_key),
+            user_prompt=service.cleanup_user_prompt(text, field_key),
+            max_tokens=700,
+        )
+        return service.transform_cleanup_result(result, mode=self.provider_key, provider_label=self.provider_label)
 
     def test_connection(self, *, service: "ImpactStoryService", settings: ProviderSettings) -> dict[str, Any]:
         self._validate_settings(settings)
@@ -1684,6 +1738,23 @@ class ImpactStoryService:
             settings=settings,
             generated_story=generated_story,
             answers=answers,
+        )
+
+    def clean_field_notes(self, payload: dict[str, Any], *, user: AuthenticatedUser) -> dict[str, Any]:
+        text = str(payload.get("text") or "").strip()
+        field_key = str(payload.get("fieldKey") or "").strip()
+        if not text:
+            raise AppError("Field text is required before cleanup.")
+        if not field_key or field_key not in self.fields:
+            raise AppError("A valid fieldKey is required for note cleanup.")
+
+        settings = ProviderSettings.from_payload(payload.get("providerSettings"), self.config.defaults)
+        provider = self._provider(settings.provider)
+        return provider.clean_field_notes(
+            service=self,
+            settings=settings,
+            text=text,
+            field_key=field_key,
         )
 
     def test_provider(self, payload: dict[str, Any], *, user: AuthenticatedUser) -> dict[str, Any]:
@@ -2127,6 +2198,41 @@ class ImpactStoryService:
             """
         ).strip()
 
+    def cleanup_developer_prompt(self, field_key: str) -> str:
+        field_label = self.fields.get(field_key, {}).get("label", field_key)
+        return textwrap.dedent(
+            f"""
+            You are cleaning rough dictated or typed notes for the Impact Story Builder field "{field_label}".
+            Rewrite only for clarity, grammar, punctuation, and removal of filler words or obvious repeated phrases.
+            Preserve the user's meaning exactly.
+            Do not add new facts, statistics, quotes, organizations, outcomes, or claims.
+            Preserve uncertainty such as "maybe", "not sure", "needs confirmation", or incomplete thoughts.
+            Do not turn a paraphrased quote into a confirmed quote.
+            Do not strengthen causality beyond what the notes support.
+            Return JSON that matches the requested structure.
+            """
+        ).strip()
+
+    def cleanup_user_prompt(self, text: str, field_key: str) -> str:
+        field_label = self.fields.get(field_key, {}).get("label", field_key)
+        return textwrap.dedent(
+            f"""
+            Field key: {field_key}
+            Field label: {field_label}
+
+            Original notes:
+            \"\"\"
+            {text}
+            \"\"\"
+
+            Return this JSON shape:
+            {{
+              "cleaned_text": "string",
+              "notes": ["string"]
+            }}
+            """
+        ).strip()
+
     def transform_analysis_result(self, result: dict[str, Any], *, mode: str, provider_label: str) -> dict[str, Any]:
         inferred_fields = [
             {
@@ -2168,6 +2274,18 @@ class ImpactStoryService:
             "providerLabel": provider_label,
             "conciseVersion": concise_version,
             "wordCount": len(concise_version.split()),
+        }
+
+    def transform_cleanup_result(self, result: dict[str, Any], *, mode: str, provider_label: str) -> dict[str, Any]:
+        cleaned_text = str(result.get("cleaned_text") or result.get("cleanedText") or "").strip()
+        if not cleaned_text:
+            raise AppError("The AI provider returned empty cleaned notes.", status_code=HTTPStatus.BAD_GATEWAY)
+        notes = [str(note).strip() for note in result.get("notes", []) if str(note).strip()]
+        return {
+            "mode": mode,
+            "providerLabel": provider_label,
+            "cleanedText": cleaned_text,
+            "notes": notes,
         }
 
     def _provider(self, provider_key: str) -> BaseProvider:
@@ -2354,6 +2472,30 @@ class ImpactStoryService:
             "wordCount": len(concise.split()),
         }
 
+    def _mock_clean_field_notes(self, text: str, field_key: str) -> dict[str, Any]:
+        cleaned = text.replace("\r\n", "\n")
+        cleaned = re.sub(r"\b(um+|uh+)\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"\b(you know|kind of|sort of)\b", "", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"([,;])\s*([,;])+", r"\1", cleaned)
+        cleaned = re.sub(r"\b(\w+)(\s+\1\b)+", r"\1", cleaned, flags=re.IGNORECASE)
+        cleaned = re.sub(r"[ \t]+", " ", cleaned)
+        cleaned = re.sub(r"\n{3,}", "\n\n", cleaned)
+        cleaned = re.sub(r"\s+([,.!?;:])", r"\1", cleaned)
+        cleaned = cleaned.strip()
+        if cleaned and cleaned[-1] not in ".!?":
+            cleaned += "."
+        cleaned = self._expand_weap_first_mention(cleaned)
+
+        notes = [
+            "Cleaned the notes for clarity and grammar without adding new facts. Please review before saving or generating."
+        ]
+        return {
+            "mode": "mock",
+            "providerLabel": "Mock AI",
+            "cleanedText": cleaned or text.strip(),
+            "notes": notes,
+        }
+
     def _format_outcome_type_phrase(self, outcome_labels: list[str]) -> str:
         cleaned = [label.strip() for label in outcome_labels if label.strip()]
         if not cleaned:
@@ -2518,6 +2660,9 @@ class ImpactStoryRequestHandler(SimpleHTTPRequestHandler):
                 return
             if parsed.path == "/api/generate-concise-version":
                 self._send_json(HTTPStatus.OK, self.server.service.generate_concise_version(payload, user=user))
+                return
+            if parsed.path == "/api/clean-field-notes":
+                self._send_json(HTTPStatus.OK, self.server.service.clean_field_notes(payload, user=user))
                 return
             if parsed.path == "/api/test-provider":
                 self._send_json(HTTPStatus.OK, self.server.service.test_provider(payload, user=user))
