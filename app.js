@@ -821,7 +821,7 @@ function render() {
 
   if (state.backendHealth?.authMode === "manual_invite" && !state.currentUser) {
     appRoot.innerHTML = `
-      <div class="app-layout public-layout">
+      <div class="app-layout public-layout auth-layout">
         ${renderPublicBrandBar()}
         ${renderManualInviteLogin()}
       </div>

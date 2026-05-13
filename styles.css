@@ -83,6 +83,11 @@ body {
   width: min(980px, calc(100vw - 2rem));
 }
 
+.auth-layout {
+  display: grid;
+  gap: 1.5rem;
+}
+
 .page-stack {
   display: grid;
   gap: 1rem;
