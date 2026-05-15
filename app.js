@@ -424,6 +424,9 @@ function getCurrentModeLabel() {
   }
 
   if (settings.provider === "claude") {
+    if (hasServerManagedClaudeKey()) {
+      return "Using organization-managed Claude API key";
+    }
     if (!normalizeAnswer(settings.apiKey)) {
       return "Claude selected, API key missing";
     }
@@ -442,7 +445,7 @@ function getCurrentModeClass() {
   if (settings.provider === "mock") {
     return "meta-pill-warning";
   }
-  if (settings.provider === "claude" && normalizeAnswer(settings.apiKey)) {
+  if (settings.provider === "claude" && (hasServerManagedClaudeKey() || normalizeAnswer(settings.apiKey))) {
     return "meta-pill-success";
   }
   if (
@@ -469,10 +472,17 @@ function getEffectiveModelLabel() {
 function getProviderPayload() {
   return {
     provider: state.providerSettings.provider,
-    apiKey: state.providerSettings.apiKey,
+    apiKey:
+      state.providerSettings.provider === "claude" && hasServerManagedClaudeKey()
+        ? ""
+        : state.providerSettings.apiKey,
     baseUrl: normalizeAnswer(state.providerSettings.baseUrl),
     model: normalizeAnswer(state.providerSettings.model),
   };
+}
+
+function hasServerManagedClaudeKey() {
+  return Boolean(state.backendHealth?.defaults?.claude?.serverManagedApiKeyAvailable);
 }
 
 function getInterviewIdFromUrl() {
@@ -1362,6 +1372,9 @@ function renderWorkspaceView(isBusy) {
 function renderSettingsPanel(testLabel, isBusy) {
   const settings = state.providerSettings;
   const showFields = settings.provider !== "mock";
+  const isClaudeProvider = settings.provider === "claude";
+  const usingServerManagedClaudeKey = isClaudeProvider && hasServerManagedClaudeKey();
+  const showClaudeApiKeyField = isClaudeProvider && !usingServerManagedClaudeKey;
   const openLabel = state.settingsExpanded ? "Hide setup" : "Show setup";
   const panelBody = state.settingsExpanded
     ? `
@@ -1379,19 +1392,44 @@ function renderSettingsPanel(testLabel, isBusy) {
           ${
             showFields
               ? `
-                <label class="settings-field">
-                  <span>API key</span>
-                  <input
-                    class="text-input"
-                    data-settings-field="apiKey"
-                    type="password"
-                    value="${escapeHtml(settings.apiKey)}"
-                    placeholder="Enter API key for this session"
-                    autocomplete="off"
-                    spellcheck="false"
-                    ${isBusy ? "disabled" : ""}
-                  />
-                </label>
+                ${
+                  isClaudeProvider
+                    ? `
+                      <div class="settings-hint-card settings-field-wide">
+                        <strong>${
+                          usingServerManagedClaudeKey
+                            ? "Using organization-managed Claude API key."
+                            : "No server-managed Claude key is configured."
+                        }</strong>
+                        <p>${
+                          usingServerManagedClaudeKey
+                            ? "Claude requests will use the server environment variable. Testers do not need to enter a key in the UI."
+                            : "Enter your own key for local testing. The key stays only in memory for this browser session."
+                        }</p>
+                      </div>
+                    `
+                    : ""
+                }
+
+                ${
+                  showClaudeApiKeyField || settings.provider === "openai_compatible"
+                    ? `
+                      <label class="settings-field">
+                        <span>API key</span>
+                        <input
+                          class="text-input"
+                          data-settings-field="apiKey"
+                          type="password"
+                          value="${escapeHtml(settings.apiKey)}"
+                          placeholder="Enter API key for this session"
+                          autocomplete="off"
+                          spellcheck="false"
+                          ${isBusy ? "disabled" : ""}
+                        />
+                      </label>
+                    `
+                    : ""
+                }
 
                 <label class="settings-field settings-field-wide">
                   <span>Base URL</span>
@@ -2049,7 +2087,7 @@ function handleProviderSelection(event) {
   } else if (nextProvider === "claude") {
     state.providerSettings = {
       provider: "claude",
-      apiKey: current.provider === "claude" ? current.apiKey : current.apiKey,
+      apiKey: hasServerManagedClaudeKey() ? "" : current.provider === "claude" ? current.apiKey : current.apiKey,
       baseUrl: state.backendHealth?.defaults?.claude?.baseUrl || "https://api.anthropic.com",
       model:
         current.provider === "claude" && normalizeAnswer(current.model)

@@ -112,6 +112,7 @@ Set these in the Render dashboard:
 Recommended defaults:
 
 - `DEFAULT_AI_PROVIDER=mock`
+- `CLAUDE_API_KEY=<optional shared Claude key>`
 - `CLAUDE_DEFAULT_BASE_URL=https://api.anthropic.com`
 - `CLAUDE_DEFAULT_MODEL=claude-sonnet-4-6`
 - `OPENAI_COMPATIBLE_DEFAULT_BASE_URL=https://api.openai.com`
@@ -193,15 +194,26 @@ Use two allowlisted emails, for example:
 
 - `mock` mode works without any API key.
 - Claude and OpenAI-compatible requests remain server-side.
-- The UI still supports entering provider settings for the demo.
-- For a real shared deployment, server-managed AI credentials would be the next step.
+- Claude supports two credential paths:
+  - `CLAUDE_API_KEY` on the server takes priority and lets testers use Claude without entering a key in the UI.
+  - A request-provided Claude API key is still supported as a fallback for local testing when `CLAUDE_API_KEY` is not set.
+- OpenAI-compatible mode still uses the existing per-session UI fields.
+
+## Claude key handling
+
+- `CLAUDE_API_KEY` is an optional server-managed environment variable for Claude mode.
+- In Render, set `CLAUDE_API_KEY` in Environment Variables if you want manual-invite testers to use Claude without typing their own key.
+- Keep `DEFAULT_AI_PROVIDER=mock` unless you explicitly want Claude selected by default.
+- Never commit real API keys.
+- Do not put real API keys in frontend code, screenshots, README examples, or GitHub.
+- This is still a demo setup. Shared API keys should live only in server environment variables.
 
 ## Repo hygiene
 
 - `.env` is ignored
 - local SQLite files are ignored
 - build output is ignored
-- do not commit real emails, shared passwords, or database URLs
+- do not commit real emails, shared passwords, database URLs, or API keys
 
 ## Known free-pilot limitations
 
@@ -210,4 +222,4 @@ Use two allowlisted emails, for example:
 - there is no Cloudflare Access, OTP, SSO, or JWT validation yet
 - there is no full story library yet
 - there is no admin panel, reporting, public sharing, or Word export
-- AI credentials are still demo-oriented rather than fully server-managed for a shared org deployment
+- AI credentials are still part of a demo-oriented setup even when `CLAUDE_API_KEY` is server-managed

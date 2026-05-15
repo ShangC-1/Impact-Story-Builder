@@ -174,6 +174,7 @@ class AppConfig:
     host: str
     port: int
     defaults: BackendDefaults
+    claude_api_key: str
     auth_mode: str
     dev_user_email: str
     demo_shared_password: str
@@ -225,6 +226,7 @@ class AppConfig:
             host=host,
             port=port,
             defaults=defaults,
+            claude_api_key=str(os.getenv("CLAUDE_API_KEY", "")).strip(),
             auth_mode=auth_mode,
             dev_user_email=str(os.getenv("DEV_USER_EMAIL", "dev@local")).strip() or "dev@local",
             demo_shared_password=str(os.getenv("DEMO_SHARED_PASSWORD", "")).strip(),
@@ -1269,8 +1271,8 @@ class ClaudeProvider(BaseProvider):
         return service.transform_cleanup_result(result, mode=self.provider_key, provider_label=self.provider_label)
 
     def test_connection(self, *, service: "ImpactStoryService", settings: ProviderSettings) -> dict[str, Any]:
-        self._require_api_key(settings)
         text = self._raw_message_call(
+            service=service,
             settings=settings,
             system_prompt="Respond with exactly OK.",
             user_prompt="Return exactly OK.",
@@ -1297,6 +1299,7 @@ class ClaudeProvider(BaseProvider):
         max_tokens: int,
     ) -> dict[str, Any]:
         raw_text = self._raw_message_call(
+            service=service,
             settings=settings,
             system_prompt=system_prompt + "\nReturn only valid JSON. Do not wrap the JSON in markdown fences.",
             user_prompt=user_prompt,
@@ -1307,12 +1310,13 @@ class ClaudeProvider(BaseProvider):
     def _raw_message_call(
         self,
         *,
+        service: "ImpactStoryService",
         settings: ProviderSettings,
         system_prompt: str,
         user_prompt: str,
         max_tokens: int,
     ) -> str:
-        self._require_api_key(settings)
+        api_key = self._require_api_key(service, settings)
         payload = {
             "model": settings.model,
             "max_tokens": max_tokens,
@@ -1328,7 +1332,7 @@ class ClaudeProvider(BaseProvider):
             self._messages_url(settings.base_url),
             data=json.dumps(payload).encode("utf-8"),
             headers={
-                "x-api-key": settings.api_key,
+                "x-api-key": api_key,
                 "anthropic-version": "2023-06-01",
                 "content-type": "application/json",
             },
@@ -1358,9 +1362,15 @@ class ClaudeProvider(BaseProvider):
             return base_url.rstrip("/")
         return append_path(base_url, "/v1/messages")
 
-    def _require_api_key(self, settings: ProviderSettings) -> None:
-        if not settings.api_key:
-            raise AppError("API key missing for Claude provider.")
+    def _require_api_key(self, service: "ImpactStoryService", settings: ProviderSettings) -> str:
+        server_managed_key = str(service.config.claude_api_key or "").strip()
+        if server_managed_key:
+            return server_managed_key
+        if settings.api_key:
+            return settings.api_key
+        raise AppError(
+            "Claude API key missing. Set CLAUDE_API_KEY on the server or enter an API key for local testing."
+        )
 
     def _extract_error_message(self, raw_body: str, provider_name: str) -> str:
         try:
@@ -1628,6 +1638,7 @@ class ImpactStoryService:
                 "claude": {
                     "baseUrl": self.config.defaults.claude_base_url,
                     "model": self.config.defaults.claude_model,
+                    "serverManagedApiKeyAvailable": bool(self.config.claude_api_key),
                 },
                 "openaiCompatible": {
                     "baseUrl": self.config.defaults.openai_compatible_base_url,
